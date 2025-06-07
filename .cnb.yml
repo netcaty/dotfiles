@@ -1,5 +1,5 @@
 include:
-    - path: "https://cnb.cool/netcat1/ci-templates/-/blob/main/template"
+    - path: "https://cnb.cool/netcat1/ci-templates/-/blob/main/template.yml"
       ignoreError: true
 
 main: # 定义触发分支
