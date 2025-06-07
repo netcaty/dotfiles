@@ -1,0 +1,42 @@
+#!/bin/bash
+
+function catfile(){
+    # 检查是否提供了参数
+    if [ $# -eq 0 ]; then
+        echo "Usage: $0 <file1> [file2] ..." >&2
+        exit 1
+    fi
+
+    # 遍历所有文件参数
+    for file in "$@"; do
+        # 检查文件是否存在且是普通文件
+        if [ ! -f "$file" ]; then
+            echo "Error: File '$file' does not exist or is not a regular file" >&2
+            continue
+        fi
+        
+        # 获取文件的绝对路径（跨平台兼容）
+        if command -v realpath >/dev/null; then
+            abs_path=$(realpath -- "$file")
+        elif command -v readlink >/dev/null; then
+            abs_path=$(readlink -f -- "$file")
+        else
+            # 回退方法：手动构建绝对路径
+            if [ -e "$file" ]; then
+                if [[ "$file" = /* ]]; then
+                    abs_path="$file"
+                else
+                    abs_path="$(pwd)/$file"
+                fi
+            else
+                abs_path="$file"
+            fi
+        fi
+        
+        # 输出注释形式的绝对路径
+        echo "# $abs_path"
+        
+        # 输出文件内容
+        cat -- "$file"
+    done
+}
