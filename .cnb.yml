@@ -4,5 +4,8 @@ include:
 
 main: # 定义触发分支
   push: # 定义触发事件
-    - stages: !reference [.job-sync-github]
+    - stages: 
+      - env:
+          github_url: 404
+        !reference [.sync-github]
         
