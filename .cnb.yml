@@ -1,10 +1,8 @@
 include:
-    - path: ""
-    - ignoreError: true
+    - path: "https://cnb.cool/netcat1/ci-templates/-/blob/main/template"
+      ignoreError: true
 
 main: # 定义触发分支
   push: # 定义触发事件
-    - stages:
-           - name: print env
-             script: env
+    - stages: !reference [.job-sync-github]
         
