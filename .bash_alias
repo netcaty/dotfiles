@@ -4,7 +4,7 @@ function catfile(){
     # 检查是否提供了参数
     if [ $# -eq 0 ]; then
         echo "Usage: $0 <file1> [file2] ..." >&2
-        exit 1
+        return 1
     fi
 
     # 遍历所有文件参数
