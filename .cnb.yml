@@ -6,7 +6,8 @@ main: # 定义触发分支
   push: # 定义触发事件
     env:
       github_url: 404
-    stages: !reference [.sync-github]
+    stages:
+      - !reference [.sync-github]
 
           
         
