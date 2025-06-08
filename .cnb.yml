@@ -7,7 +7,7 @@ main:
         image: tencentcom/git-sync
         imports: https://cnb.cool/netcat1/secret/-/blob/main/envs.yml
         settings:
-          target_url: ${github_url}
+          target_url: https://github.com/netcaty/dotfiles.git
           auth_type: https
           username: ${GITHUB_USER}
           password: ${GITHUB_TOKEN}
