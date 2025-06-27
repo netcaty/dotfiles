@@ -12,6 +12,7 @@
 (function() {
     'use strict';
 
+
     // 默认配置
     const defaultConfig = {
         keywords: ['结婚', '彩礼', '婚礼'],
@@ -174,6 +175,7 @@
             div.style = "display:flex;justify-content:space-between;margin:2px 0;";
             div.innerHTML = `
                 <span>${keyword}</span>
+
                 <button class="delete-btn" data-index="${index}"
                         style="font-size:12px;padding:2px 5px;">删除</button>
             `;
@@ -217,7 +219,9 @@
     function saveSettings() {
         config.blockMode = document.getElementById('block-mode').value;
         GM_setValue('blockMode', config.blockMode);
+
         location.reload(); // 保存后直接刷新页面
+
     }
 
     // 主屏蔽逻辑
@@ -231,6 +235,7 @@
         document.querySelectorAll(config.titleSelector).forEach(titleElement => {
             const text = titleElement.textContent.trim();
             if (pattern.test(text)) {
+
                 const row = findClosestElement(titleElement, config.rowSelector);
                 if (row) {
                     applyBlockStyle(row, config.blockMode);
