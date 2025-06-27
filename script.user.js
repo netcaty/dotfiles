@@ -18,8 +18,8 @@
         keywords: ['结婚', '彩礼', '婚礼'],
         blockMode: 'hide',
         enabled: true,
-        titleSelector: 'span.item_title',
-        rowSelector: 'tr'
+        titleSelector: 'div.cell.item',
+        rowSelector: 'span.item_title a'
     };
 
     // 读取配置
@@ -230,15 +230,33 @@
 
         if (!config.keywords.length) return;
 
-        const pattern = new RegExp(config.keywords.join('|'), 'i');
+        const lowerCaseKeywords = config.keywords.map(k => k.toLowerCase());
 
-        document.querySelectorAll(config.titleSelector).forEach(titleElement => {
-            const text = titleElement.textContent.trim();
-            if (pattern.test(text)) {
+        //const pattern = new RegExp(config.keywords.join('|'), 'i');
 
-                const row = findClosestElement(titleElement, config.rowSelector);
-                if (row) {
-                    applyBlockStyle(row, config.blockMode);
+            /**
+         * 获取页面上所有的帖子项
+         * V2EX 的帖子项通常是 <div class="cell item">
+         */
+        const topicItems = document.querySelectorAll(config.titleSelector);
+
+        /**
+         * 遍历所有帖子
+         */
+        topicItems.forEach(item => {
+            // 获取帖子标题元素
+            const titleElement = item.querySelector(config.rowSelector);
+
+            if (titleElement) {
+                const title = titleElement.innerText.toLowerCase(); // 获取标题文本并转为小写
+
+                // 检查标题是否包含任何一个需要屏蔽的关键词
+                const shouldBlock = lowerCaseKeywords.some(keyword => title.includes(keyword));
+
+                if (shouldBlock) {
+                    // 如果包含，则隐藏整个帖子项
+                    applyBlockStyle(item, config.blockMode);
+                    console.log(`已屏蔽: ${titleElement.href}`);
                 }
             }
         });
