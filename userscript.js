@@ -2,7 +2,7 @@
 // @name         v2ex屏蔽器
 // @namespace    http://tampermonkey.net/
 // @version      1.0
-// @description  屏蔽包含指定关键词的网页内容（如论坛帖子）
+// @description  屏蔽包含指定关键词
 // @author       YourName
 // @match        *://*.v2ex.com/*
 // @grant        none
