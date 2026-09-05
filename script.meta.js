@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         v2ex屏蔽器
 // @namespace    http://tampermonkey.net/
-// @version      2.12
-// @description  支持关键词屏蔽 + 动态更新 + 开关切换不刷新 + Base64 内容自动解码
+// @version      2.13
+// @description  支持关键词屏蔽 + 动态更新 + 开关切换不刷新 + Base64 内容自动解码 + 回复框编辑/预览
 // @author       YourName
 // @match        *://*.v2ex.com/*
 // @grant        GM_getValue
