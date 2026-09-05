@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         v2ex屏蔽器
 // @namespace    http://tampermonkey.net/
-// @version      2.10
+// @version      2.11
 // @description  支持关键词屏蔽 + 动态更新 + 开关切换不刷新 + Base64 内容自动解码
 // @author       YourName
 // @match        *://*.v2ex.com/*
@@ -19,7 +19,9 @@
         blockMode: 'hide',
         enabled: true,
         decodeBase64: true,
-        titleSelector: 'div.cell.item',
+        // 从标题链接向上查找的行容器：首页是 div.cell.item，节点页（/go/xxx）是 div.cell.from_xxx.t_xxx，
+        // 统一用 div.cell 两边都命中（closest 只会命中标题所在的行，不会误伤页头/分页等 cell）
+        titleSelector: 'div.cell',
         rowSelector: 'span.item_title a'
     };
 
@@ -284,29 +286,25 @@
         //const pattern = new RegExp(config.keywords.join('|'), 'i');
 
             /**
-         * 获取页面上所有的帖子项
-         * V2EX 的帖子项通常是 <div class="cell item">
+         * 以标题链接为锚点遍历所有帖子，再向上定位行容器。
+         * 节点页（/go/xxx）的行容器没有 item class，不能按容器正向查找，
+         * 统一从 rowSelector 反查 titleSelector，两种页面通用。
          */
-        const topicItems = document.querySelectorAll(config.titleSelector);
+        const titleLinks = document.querySelectorAll(config.rowSelector);
 
-        /**
-         * 遍历所有帖子
-         */
-        topicItems.forEach(item => {
-            // 获取帖子标题元素
-            const titleElement = item.querySelector(config.rowSelector);
+        titleLinks.forEach(link => {
+            const item = link.closest(config.titleSelector);
+            if (!item) return;
 
-            if (titleElement) {
-                const title = titleElement.innerText.toLowerCase(); // 获取标题文本并转为小写
+            const title = link.innerText.toLowerCase(); // 获取标题文本并转为小写
 
-                // 检查标题是否包含任何一个需要屏蔽的关键词
-                const shouldBlock = lowerCaseKeywords.some(keyword => title.includes(keyword));
+            // 检查标题是否包含任何一个需要屏蔽的关键词
+            const shouldBlock = lowerCaseKeywords.some(keyword => title.includes(keyword));
 
-                if (shouldBlock) {
-                    // 如果包含，则隐藏整个帖子项
-                    applyBlockStyle(item, config.blockMode);
-                    console.log(`已屏蔽: ${titleElement.href}`);
-                }
+            if (shouldBlock) {
+                // 如果包含，则隐藏整个帖子项
+                applyBlockStyle(item, config.blockMode);
+                console.log(`已屏蔽: ${link.href}`);
             }
         });
     }
