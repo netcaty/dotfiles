@@ -1,12 +1,14 @@
 // ==UserScript==
 // @name         v2ex屏蔽器
 // @namespace    http://tampermonkey.net/
-// @version      2.11
+// @version      2.12
 // @description  支持关键词屏蔽 + 动态更新 + 开关切换不刷新 + Base64 内容自动解码
 // @author       YourName
 // @match        *://*.v2ex.com/*
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @updateURL    https://raw.githubusercontent.com/netcaty/dotfiles/main/script.meta.js
+// @downloadURL  https://raw.githubusercontent.com/netcaty/dotfiles/main/script.user.js
 // ==/UserScript==
 
 (function() {
@@ -24,6 +26,9 @@
         titleSelector: 'div.cell',
         rowSelector: 'span.item_title a'
     };
+
+    // 当前版本号（显示在设置面板标题旁，便于确认更新是否生效）
+    const SCRIPT_VERSION = '2.12';
 
     // 存储兼容层：Userscripts（iOS Safari）只提供异步的 GM.getValue/GM.setValue，
     // 不支持同步 GM_getValue/GM_setValue，该环境下回落到 localStorage
@@ -119,7 +124,7 @@
         `;
 
         panel.innerHTML = `
-            <h3 style="margin-top:0;">内容屏蔽设置</h3>
+            <h3 style="margin-top:0;">内容屏蔽设置 <span style="font-size:12px;font-weight:normal;color:#888;">v${SCRIPT_VERSION}</span></h3>
 
             <div style="margin-bottom:10px;">
                 <label>
