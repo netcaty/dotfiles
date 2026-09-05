@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         v2ex屏蔽器
 // @namespace    http://tampermonkey.net/
-// @version      2.9
+// @version      2.10
 // @description  支持关键词屏蔽 + 动态更新 + 开关切换不刷新 + Base64 内容自动解码
 // @author       YourName
 // @match        *://*.v2ex.com/*
@@ -23,14 +23,40 @@
         rowSelector: 'span.item_title a'
     };
 
+    // 存储兼容层：Userscripts（iOS Safari）只提供异步的 GM.getValue/GM.setValue，
+    // 不支持同步 GM_getValue/GM_setValue，该环境下回落到 localStorage
+    function gmGet(key, def) {
+        try {
+            if (typeof GM_getValue === 'function') return GM_getValue(key, def);
+        } catch (e) {}
+        try {
+            const raw = localStorage.getItem('v2ex-blocker.' + key);
+            return raw === null ? def : JSON.parse(raw);
+        } catch (e) {
+            return def;
+        }
+    }
+
+    function gmSet(key, val) {
+        try {
+            if (typeof GM_setValue === 'function') {
+                GM_setValue(key, val);
+                return;
+            }
+        } catch (e) {}
+        try {
+            localStorage.setItem('v2ex-blocker.' + key, JSON.stringify(val));
+        } catch (e) {}
+    }
+
     // 读取配置
     const config = {
-        keywords: GM_getValue('keywords', defaultConfig.keywords),
-        blockMode: GM_getValue('blockMode', defaultConfig.blockMode),
-        enabled: GM_getValue('enabled', defaultConfig.enabled),
-        titleSelector: GM_getValue('titleSelector', defaultConfig.titleSelector),
-        rowSelector: GM_getValue('rowSelector', defaultConfig.rowSelector),
-        decodeBase64: GM_getValue('decodeBase64', defaultConfig.decodeBase64)
+        keywords: gmGet('keywords', defaultConfig.keywords),
+        blockMode: gmGet('blockMode', defaultConfig.blockMode),
+        enabled: gmGet('enabled', defaultConfig.enabled),
+        titleSelector: gmGet('titleSelector', defaultConfig.titleSelector),
+        rowSelector: gmGet('rowSelector', defaultConfig.rowSelector),
+        decodeBase64: gmGet('decodeBase64', defaultConfig.decodeBase64)
     };
 
     // 创建悬浮图标
@@ -147,7 +173,7 @@
         // 启用/禁用开关（不刷新页面；关闭时还原已屏蔽内容，开启时重新屏蔽）
         document.getElementById('enable-toggle').addEventListener('change', (e) => {
             config.enabled = e.target.checked;
-            GM_setValue('enabled', config.enabled);
+            gmSet('enabled', config.enabled);
             if (config.enabled) {
                 initBlocker();
             } else {
@@ -158,7 +184,7 @@
         // Base64 解码开关（不刷新页面，直接生效；关闭时还原原文）
         document.getElementById('base64-toggle').addEventListener('change', (e) => {
             config.decodeBase64 = e.target.checked;
-            GM_setValue('decodeBase64', config.decodeBase64);
+            gmSet('decodeBase64', config.decodeBase64);
             toggleBase64Decode();
         });
 
@@ -219,7 +245,7 @@
     function removeKeyword(index) {
         if (index >= 0 && index < config.keywords.length) {
             config.keywords.splice(index, 1);
-            GM_setValue('keywords', config.keywords);
+            gmSet('keywords', config.keywords);
             updateKeywordList(); // 刷新关键词列表
             initBlocker(); // 立即应用新的屏蔽规则
         }
@@ -231,7 +257,7 @@
         const keyword = input.value.trim();
         if (keyword && !config.keywords.includes(keyword)) {
             config.keywords.push(keyword);
-            GM_setValue('keywords', config.keywords);
+            gmSet('keywords', config.keywords);
             updateKeywordList();
             input.value = '';
             initBlocker(); // 立即应用新的屏蔽规则
@@ -241,7 +267,7 @@
     // 保存设置
     function saveSettings() {
         config.blockMode = document.getElementById('block-mode').value;
-        GM_setValue('blockMode', config.blockMode);
+        gmSet('blockMode', config.blockMode);
 
         location.reload(); // 保存后直接刷新页面
 
@@ -344,10 +370,12 @@
 
     // Base64 识别：支持标准 base64 及 URL-safe 变体（- / _）
     // 最少 6 个 base64 字符（+ 最多 2 位 padding），可覆盖 "dGVzdA==" 这类短编码
-    // 前后加边界断言：base64 片段前后不应紧贴其它 base64 字符
-    const BASE64_CHAR = '[A-Za-z0-9+/_-]';
-    const BASE64_TOKEN_RE = new RegExp(`(?<!${BASE64_CHAR})${BASE64_CHAR}{6,}={0,2}(?!${BASE64_CHAR})`, 'g');
-    const BASE64_QUICK_RE = new RegExp(`(?<!${BASE64_CHAR})${BASE64_CHAR}{6,}={0,2}(?!${BASE64_CHAR})`);
+    // 前后加边界：base64 片段前后不应紧贴其它 base64 字符
+    // 前边界用捕获组实现而非 lookbehind（iOS Safari 16.4 以下不支持 lookbehind）
+    const BASE64_BODY = 'A-Za-z0-9+/_-';
+    const BASE64_CLS = `[${BASE64_BODY}]`;
+    const BASE64_TOKEN_RE = new RegExp(`(^|[^${BASE64_BODY}])(${BASE64_CLS}{6,}={0,2})(?!${BASE64_CLS})`, 'g');
+    const BASE64_QUICK_RE = new RegExp(`${BASE64_CLS}{6,}={0,2}`);
     const BASE64_MAX_LEN = 1024;
 
     // 记录被解码文本节点的原始内容，用于关闭开关时还原
@@ -426,13 +454,14 @@
         if (!text || text.length < 6) return;
         if (!BASE64_QUICK_RE.test(text)) return;
 
-        const newText = text.replace(BASE64_TOKEN_RE, (token) => {
+        // 匹配结果 = 前导字符(组1) + base64 片段(组2)，还原时需带上前导字符
+        const newText = text.replace(BASE64_TOKEN_RE, (match, pre, token) => {
             const decoded = decodeBase64Text(token);
             if (decoded !== null) {
                 console.log('Base64 解码:', token, '→', decoded);
-                return decoded;
+                return pre + decoded;
             }
-            return token;
+            return match;
         });
 
         if (newText !== text) {
