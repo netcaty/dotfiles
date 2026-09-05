@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         v2ex屏蔽器
 // @namespace    http://tampermonkey.net/
-// @version      2.14
+// @version      2.15
 // @description  支持关键词屏蔽 + 动态更新 + 开关切换不刷新 + Base64 内容自动解码 + 回复框编辑/预览 + 图片粘贴上传
 // @author       YourName
 // @match        *://*.v2ex.com/*
@@ -29,7 +29,7 @@
     };
 
     // 当前版本号（显示在设置面板标题旁，便于确认更新是否生效）
-    const SCRIPT_VERSION = '2.14';
+    const SCRIPT_VERSION = '2.15';
 
     // 存储兼容层：Userscripts（iOS Safari）只提供异步的 GM.getValue/GM.setValue，
     // 不支持同步 GM_getValue/GM_setValue，该环境下回落到 localStorage
@@ -513,6 +513,7 @@
     // 统一处理 DOM 变化（关键词屏蔽 + base64 解码）
     function onDomChange(mutations) {
         if (config.enabled) initBlocker();
+        ensureReplyPreview();
         if (!config.decodeBase64) return;
 
         mutations.forEach((mutation) => {
@@ -597,18 +598,22 @@
 
     function initReplyPreview() {
         const textarea = document.getElementById('reply-content');
-        if (!textarea || textarea.dataset.previewEnhanced) return;
+        if (!textarea || textarea.dataset.previewEnhanced === '1') return;
         textarea.dataset.previewEnhanced = '1';
 
-        const style = document.createElement('style');
-        style.textContent = `
-            .rp-tab { cursor:pointer; margin-right:15px; padding-bottom:2px; display:inline-block;
-                      border-bottom:2px solid transparent; color:#778087; user-select:none; }
-            .rp-tab.rp-active { border-bottom-color:#333; color:#333; font-weight:500; }
-        `;
-        document.head.appendChild(style);
+        if (!document.getElementById('rp-style')) {
+            const style = document.createElement('style');
+            style.id = 'rp-style';
+            style.textContent = `
+                .rp-tab { cursor:pointer; margin-right:15px; padding-bottom:2px; display:inline-block;
+                          border-bottom:2px solid transparent; color:#778087; user-select:none; }
+                .rp-tab.rp-active { border-bottom-color:#333; color:#333; font-weight:500; }
+            `;
+            document.head.appendChild(style);
+        }
 
         const tabBar = document.createElement('div');
+        tabBar.id = 'rp-tab-bar';
         tabBar.style.cssText = 'margin:0 0 5px;font-size:14px;';
         tabBar.innerHTML = `
             <span class="rp-tab rp-active" data-tab="edit">编辑</span>
@@ -756,6 +761,28 @@
             hint.textContent = (isMac ? '⌘' : 'Ctrl') + ' + Enter 快速回复';
             submitBtn.parentNode.insertBefore(hint, submitBtn.nextSibling);
         }
+    }
+
+    // 回复框可能被其它脚本（如“回复框停靠”类工具）重建或挪动：
+    // 在 MutationObserver 里确认标签栏仍紧贴 textarea——被挪走就跟随，被销毁就重建
+    function ensureReplyPreview() {
+        const textarea = document.getElementById('reply-content');
+        if (!textarea || !textarea.parentNode) return;
+        const tabBar = document.getElementById('rp-tab-bar');
+        const previewBox = document.getElementById('reply-preview');
+        if (textarea.dataset.previewEnhanced === '1' && tabBar && previewBox &&
+            tabBar.parentNode === textarea.parentNode) return;
+        if (!textarea.dataset.previewEnhanced || !tabBar || !previewBox) {
+            // textarea 被替换成新元素，或 UI 节点被其它脚本销毁：清掉残留后重建
+            if (tabBar) tabBar.remove();
+            if (previewBox) previewBox.remove();
+            delete textarea.dataset.previewEnhanced;
+            initReplyPreview();
+            return;
+        }
+        // 同一个 textarea 被挪到了新位置：标签栏和预览跟随过去
+        textarea.parentNode.insertBefore(tabBar, textarea);
+        textarea.parentNode.insertBefore(previewBox, textarea.nextSibling);
     }
 
     // ==================== 初始化 ====================
