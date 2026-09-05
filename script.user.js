@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         v2ex屏蔽器
 // @namespace    http://tampermonkey.net/
-// @version      2.13
-// @description  支持关键词屏蔽 + 动态更新 + 开关切换不刷新 + Base64 内容自动解码 + 回复框编辑/预览
+// @version      2.14
+// @description  支持关键词屏蔽 + 动态更新 + 开关切换不刷新 + Base64 内容自动解码 + 回复框编辑/预览 + 图片粘贴上传
 // @author       YourName
 // @match        *://*.v2ex.com/*
 // @grant        GM_getValue
@@ -24,11 +24,12 @@
         // 从标题链接向上查找的行容器：首页是 div.cell.item，节点页（/go/xxx）是 div.cell.from_xxx.t_xxx，
         // 统一用 div.cell 两边都命中（closest 只会命中标题所在的行，不会误伤页头/分页等 cell）
         titleSelector: 'div.cell',
-        rowSelector: 'span.item_title a'
+        rowSelector: 'span.item_title a',
+        imgurClientId: ''
     };
 
     // 当前版本号（显示在设置面板标题旁，便于确认更新是否生效）
-    const SCRIPT_VERSION = '2.13';
+    const SCRIPT_VERSION = '2.14';
 
     // 存储兼容层：Userscripts（iOS Safari）只提供异步的 GM.getValue/GM.setValue，
     // 不支持同步 GM_getValue/GM_setValue，该环境下回落到 localStorage
@@ -63,7 +64,8 @@
         enabled: gmGet('enabled', defaultConfig.enabled),
         titleSelector: gmGet('titleSelector', defaultConfig.titleSelector),
         rowSelector: gmGet('rowSelector', defaultConfig.rowSelector),
-        decodeBase64: gmGet('decodeBase64', defaultConfig.decodeBase64)
+        decodeBase64: gmGet('decodeBase64', defaultConfig.decodeBase64),
+        imgurClientId: (gmGet('imgurClientId', defaultConfig.imgurClientId) || '').trim()
     };
 
     // 创建悬浮图标
@@ -163,6 +165,13 @@
             <button id="save-settings" style="margin-top:15px;width:100%;padding:8px;">
                 保存设置
             </button>
+
+            <div style="margin-top:10px;border-top:1px solid #eee;padding-top:10px;">
+                <label>Imgur Client-ID（回复框粘贴图片自动上传）：
+                    <input id="imgur-client-id" type="text" placeholder="免费注册 api.imgur.com 应用后填入"
+                           style="width:100%;margin-top:5px;padding:5px;font-size:13px;box-sizing:border-box;">
+                </label>
+            </div>
         `;
 
         document.body.appendChild(panel);
@@ -193,6 +202,14 @@
             config.decodeBase64 = e.target.checked;
             gmSet('decodeBase64', config.decodeBase64);
             toggleBase64Decode();
+        });
+
+        // Imgur Client-ID（失焦即保存）
+        const imgurInput = document.getElementById('imgur-client-id');
+        imgurInput.value = config.imgurClientId;
+        imgurInput.addEventListener('change', () => {
+            config.imgurClientId = imgurInput.value.trim();
+            gmSet('imgurClientId', config.imgurClientId);
         });
 
         return panel;
@@ -596,6 +613,7 @@
         tabBar.innerHTML = `
             <span class="rp-tab rp-active" data-tab="edit">编辑</span>
             <span class="rp-tab" data-tab="preview">预览</span>
+            <span id="rp-upload-status" style="float:right;font-size:12px;color:#99a0a6;"></span>
         `;
 
         const previewBox = document.createElement('div');
@@ -641,6 +659,90 @@
                 const btn = form ? form.querySelector('input[type="submit"], button[type="submit"]') : null;
                 if (btn) btn.click();
             }
+        });
+
+        // ==================== 图片粘贴/拖放上传（Imgur） ====================
+        const uploadStatusEl = tabBar.querySelector('#rp-upload-status');
+        const setUploadStatus = (text, isError) => {
+            uploadStatusEl.textContent = text;
+            uploadStatusEl.style.color = isError ? '#d9534f' : '#99a0a6';
+            if (!isError && text && text !== '上传中…') {
+                setTimeout(() => { if (uploadStatusEl.textContent === text) uploadStatusEl.textContent = ''; }, 2500);
+            }
+        };
+
+        let uploadSeq = 0;
+        const handleImageUpload = blob => {
+            const clientId = (gmGet('imgurClientId', '') || '').trim();
+            if (!clientId) {
+                setUploadStatus('未配置 Imgur Client-ID，请在设置面板填写', true);
+                return;
+            }
+            // 光标处插入占位符，成功后替换为图片链接，失败则回收
+            const ph = `[图片上传中…#${++uploadSeq}]`;
+            const start = textarea.selectionStart ?? textarea.value.length;
+            const end = textarea.selectionEnd ?? start;
+            textarea.value = textarea.value.slice(0, start) + ph + textarea.value.slice(end);
+            textarea.selectionStart = textarea.selectionEnd = start + ph.length;
+            textarea.dispatchEvent(new Event('input'));
+            setUploadStatus('上传中…');
+            const fd = new FormData();
+            fd.append('image', blob, 'clipboard.png');
+            fetch('https://api.imgur.com/3/image', {
+                method: 'POST',
+                headers: { Authorization: 'Client-ID ' + clientId },
+                body: fd
+            }).then(res => res.json().then(json => {
+                if (!res.ok || !json.success) {
+                    // v3 标准错误为 { data: { error } }，imgur 网关限流错误为 { errors: [...] }
+                    const v3 = json.data && json.data.error;
+                    const gw = json.errors && json.errors[0];
+                    const msg = (typeof v3 === 'string' && v3)
+                        || (v3 && v3.message)
+                        || (gw && (gw.detail || gw.status))
+                        || 'HTTP ' + res.status;
+                    throw new Error(msg);
+                }
+                return json.data.link;
+            })).then(link => {
+                textarea.value = textarea.value.replace(ph, link);
+                const pos = textarea.value.indexOf(link) + link.length;
+                textarea.selectionStart = textarea.selectionEnd = pos;
+                textarea.dispatchEvent(new Event('input'));
+                setUploadStatus('上传成功');
+            }).catch(err => {
+                textarea.value = textarea.value.replace(ph, '');
+                textarea.dispatchEvent(new Event('input'));
+                setUploadStatus('上传失败：' + err.message, true);
+            });
+        };
+
+        // 粘贴剪贴板图片 → 自动上传；纯文本粘贴不受任何影响
+        textarea.addEventListener('paste', e => {
+            const items = e.clipboardData && e.clipboardData.items;
+            if (!items) return;
+            let imageItem = null;
+            for (let i = 0; i < items.length; i++) {
+                if (items[i].type && items[i].type.indexOf('image/') === 0) { imageItem = items[i]; break; }
+            }
+            if (!imageItem) return;
+            e.preventDefault();
+            const blob = imageItem.getAsFile();
+            if (blob) handleImageUpload(blob);
+        });
+
+        // 拖放图片文件（桌面端）
+        textarea.addEventListener('dragover', e => e.preventDefault());
+        textarea.addEventListener('drop', e => {
+            const files = e.dataTransfer && e.dataTransfer.files;
+            if (!files || !files.length) return;
+            let file = null;
+            for (let i = 0; i < files.length; i++) {
+                if (files[i].type && files[i].type.indexOf('image/') === 0) { file = files[i]; break; }
+            }
+            if (!file) return;
+            e.preventDefault();
+            handleImageUpload(file);
         });
 
         // 回复按钮旁的快捷键提示
