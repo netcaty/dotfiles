@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         v2ex屏蔽器
 // @namespace    http://tampermonkey.net/
-// @version      2.12
-// @description  支持关键词屏蔽 + 动态更新 + 开关切换不刷新 + Base64 内容自动解码
+// @version      2.13
+// @description  支持关键词屏蔽 + 动态更新 + 开关切换不刷新 + Base64 内容自动解码 + 回复框编辑/预览
 // @author       YourName
 // @match        *://*.v2ex.com/*
 // @grant        GM_getValue
@@ -28,7 +28,7 @@
     };
 
     // 当前版本号（显示在设置面板标题旁，便于确认更新是否生效）
-    const SCRIPT_VERSION = '2.12';
+    const SCRIPT_VERSION = '2.13';
 
     // 存储兼容层：Userscripts（iOS Safari）只提供异步的 GM.getValue/GM.setValue，
     // 不支持同步 GM_getValue/GM_setValue，该环境下回落到 localStorage
@@ -509,6 +509,153 @@
         });
     }
 
+    // ==================== 回复框增强：编辑/预览 ====================
+
+    // V2EX 常用格式的近似渲染（链接、图片、@会员、/t/ 主题、行内代码、代码块、引用、加粗/斜体/删除线）。
+    // 预览仅供参考，提交后的最终渲染以 V2EX 服务端为准。
+    function renderPreview(raw) {
+        const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                          .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        const store = [];
+        const stash = html => { store.push(html); return `\x00${store.length - 1}\x00`; };
+
+        // 代码块先摘出，内部内容只做转义，不参与后续渲染
+        let text = raw.replace(/```[\s\S]*?```/g, m => stash(
+            `<pre style="margin:6px 0;padding:8px;background:#f8f8f8;border:1px solid #ddd;border-radius:3px;overflow-x:auto;">` +
+            `<code style="font-size:13px;">${esc(m.replace(/^```[^\n]*\n?/, '').replace(/```\s*$/, ''))}</code></pre>`
+        ));
+        text = esc(text);
+
+        const IMG_RE = /^https?:\/\/[^\s"'<>]+?\.(?:png|jpe?g|gif|webp|bmp|svg)(?:\?[^\s"'<>]*)?$/i;
+
+        const renderLine = line => {
+            // 行内代码先摘出，内部不再转链接
+            line = line.replace(/`([^`]+)`/g, (m, c) => stash(
+                `<code style="background:#f3f3f3;border-radius:3px;padding:1px 4px;font-size:13px;">${c}</code>`
+            ));
+            // URL → 图片 / 链接（尾部标点不算链接的一部分）
+            line = line.replace(/https?:\/\/[^\s"'<>]+/g, url => {
+                const tail = url.match(/[.,;:!?)\]}'"，。；！？：）」』]+$/);
+                let main = url, after = '';
+                if (tail) { after = tail[0]; main = url.slice(0, url.length - after.length); }
+                const inner = IMG_RE.test(main)
+                    ? stash(`<img src="${main}" style="max-width:100%;border-radius:3px;" loading="lazy">`)
+                    : stash(`<a href="${main}" target="_blank" rel="noopener">${main}</a>`);
+                return inner + after;
+            });
+            // 站内主题链接 /t/123456（可带 #回复 锚点）
+            line = line.replace(/(^|[\s(])(\/t\/\d+(?:#\w+)?)/g, (m, pre, path) =>
+                pre + stash(`<a href="${path}">${path}</a>`));
+            // @会员（要求 @ 前是行首或空白，避免误伤邮箱）
+            line = line.replace(/(^|\s)@([a-zA-Z0-9_-]+)/g, (m, pre, u) =>
+                pre + stash(`<a href="/member/${u}">@${u}</a>`));
+            // 加粗 / 斜体 / 删除线
+            line = line.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+            line = line.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
+            line = line.replace(/~~([^~\n]+)~~/g, '<del>$1</del>');
+            return line;
+        };
+
+        // 逐行渲染，连续的 > 行合并为一个引用块
+        const outLines = [];
+        let inQuote = false;
+        text.split('\n').forEach(rawLine => {
+            const line = renderLine(rawLine);
+            if (/^&gt;\s?/.test(line)) {
+                if (!inQuote) {
+                    outLines.push('<blockquote style="margin:6px 0;padding:4px 10px;border-left:3px solid #ccc;color:#666;">');
+                    inQuote = true;
+                }
+                outLines.push(line.replace(/^&gt;\s?/, '') + '<br>');
+            } else {
+                if (inQuote) { outLines.push('</blockquote>'); inQuote = false; }
+                outLines.push(line + '<br>');
+            }
+        });
+        if (inQuote) outLines.push('</blockquote>');
+
+        // 还原占位块；独立成行的块不吃 <br>
+        return outLines.join('').replace(/(?:<br>)?\x00(\d+)\x00(?:<br>)?/g, (m, i) => store[+i]);
+    }
+
+    function initReplyPreview() {
+        const textarea = document.getElementById('reply-content');
+        if (!textarea || textarea.dataset.previewEnhanced) return;
+        textarea.dataset.previewEnhanced = '1';
+
+        const style = document.createElement('style');
+        style.textContent = `
+            .rp-tab { cursor:pointer; margin-right:15px; padding-bottom:2px; display:inline-block;
+                      border-bottom:2px solid transparent; color:#778087; user-select:none; }
+            .rp-tab.rp-active { border-bottom-color:#333; color:#333; font-weight:500; }
+        `;
+        document.head.appendChild(style);
+
+        const tabBar = document.createElement('div');
+        tabBar.style.cssText = 'margin:0 0 5px;font-size:14px;';
+        tabBar.innerHTML = `
+            <span class="rp-tab rp-active" data-tab="edit">编辑</span>
+            <span class="rp-tab" data-tab="preview">预览</span>
+        `;
+
+        const previewBox = document.createElement('div');
+        previewBox.id = 'reply-preview';
+        previewBox.style.cssText = 'display:none;min-height:110px;max-height:420px;overflow:auto;' +
+            'border:1px solid #e2e2e2;border-radius:3px;background:#fff;padding:12px;' +
+            'font-size:14px;line-height:1.6;word-break:break-word;';
+        const emptyHint = '<span style="color:#ccc;">暂无内容，回到"编辑"输入后这里会实时渲染预览。</span>';
+        previewBox.innerHTML = emptyHint;
+
+        textarea.parentNode.insertBefore(tabBar, textarea);
+        textarea.parentNode.insertBefore(previewBox, textarea.nextSibling);
+
+        let mode = 'edit';
+        const setTab = next => {
+            mode = next;
+            const isPreview = next === 'preview';
+            textarea.style.display = isPreview ? 'none' : '';
+            previewBox.style.display = isPreview ? 'block' : 'none';
+            tabBar.querySelectorAll('.rp-tab').forEach(t => {
+                t.classList.toggle('rp-active', t.dataset.tab === next);
+            });
+            if (isPreview) {
+                previewBox.innerHTML = renderPreview(textarea.value) || emptyHint;
+            }
+        };
+
+        tabBar.addEventListener('click', e => {
+            const tab = e.target.closest('.rp-tab');
+            if (tab) setTab(tab.dataset.tab);
+        });
+
+        // 预览模式下实时渲染
+        textarea.addEventListener('input', () => {
+            if (mode === 'preview') previewBox.innerHTML = renderPreview(textarea.value) || emptyHint;
+        });
+
+        // Cmd/Ctrl + Enter 快速回复
+        textarea.addEventListener('keydown', e => {
+            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                e.preventDefault();
+                const form = textarea.closest('form');
+                const btn = form ? form.querySelector('input[type="submit"], button[type="submit"]') : null;
+                if (btn) btn.click();
+            }
+        });
+
+        // 回复按钮旁的快捷键提示
+        const form = textarea.closest('form');
+        const submitBtn = form ? form.querySelector('input[type="submit"], button[type="submit"]') : null;
+        if (submitBtn && !submitBtn.dataset.rpHint) {
+            submitBtn.dataset.rpHint = '1';
+            const isMac = /Mac|iPhone|iPad/.test(navigator.platform || '');
+            const hint = document.createElement('span');
+            hint.style.cssText = 'margin-left:8px;color:#99a0a6;font-size:12px;vertical-align:middle;';
+            hint.textContent = (isMac ? '⌘' : 'Ctrl') + ' + Enter 快速回复';
+            submitBtn.parentNode.insertBefore(hint, submitBtn.nextSibling);
+        }
+    }
+
     // ==================== 初始化 ====================
     const icon = createTriggerIcon();
     const panel = createSettingsPanel();
@@ -516,6 +663,7 @@
     if (config.decodeBase64) {
         getTextNodesWithin(document.body).forEach(decodeTextNode);
     }
+    initReplyPreview();
 
     // 监听动态内容
     const observer = new MutationObserver(onDomChange);
