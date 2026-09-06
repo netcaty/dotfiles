@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         v2ex屏蔽器
 // @namespace    http://tampermonkey.net/
-// @version      2.15
+// @version      2.16
 // @description  支持关键词屏蔽 + 动态更新 + 开关切换不刷新 + Base64 内容自动解码 + 回复框编辑/预览 + 图片粘贴上传
 // @author       YourName
 // @match        *://*.v2ex.com/*
@@ -29,7 +29,7 @@
     };
 
     // 当前版本号（显示在设置面板标题旁，便于确认更新是否生效）
-    const SCRIPT_VERSION = '2.15';
+    const SCRIPT_VERSION = '2.16';
 
     // 存储兼容层：Userscripts（iOS Safari）只提供异步的 GM.getValue/GM.setValue，
     // 不支持同步 GM_getValue/GM_setValue，该环境下回落到 localStorage
@@ -596,8 +596,12 @@
         return outLines.join('').replace(/(?:<br>)?\x00(\d+)\x00(?:<br>)?/g, (m, i) => store[+i]);
     }
 
+    // V2EX 真实回复框的 id 是 reply_content（下划线）；兼容 reply-content 以防官方改回
+    const getReplyTextarea = () => document.getElementById('reply_content') ||
+                                   document.getElementById('reply-content');
+
     function initReplyPreview() {
-        const textarea = document.getElementById('reply-content');
+        const textarea = getReplyTextarea();
         if (!textarea || textarea.dataset.previewEnhanced === '1') return;
         textarea.dataset.previewEnhanced = '1';
 
@@ -766,7 +770,7 @@
     // 回复框可能被其它脚本（如“回复框停靠”类工具）重建或挪动：
     // 在 MutationObserver 里确认标签栏仍紧贴 textarea——被挪走就跟随，被销毁就重建
     function ensureReplyPreview() {
-        const textarea = document.getElementById('reply-content');
+        const textarea = getReplyTextarea();
         if (!textarea || !textarea.parentNode) return;
         const tabBar = document.getElementById('rp-tab-bar');
         const previewBox = document.getElementById('reply-preview');
