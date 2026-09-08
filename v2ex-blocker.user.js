@@ -1,14 +1,17 @@
 // ==UserScript==
 // @name         v2ex屏蔽器
-// @namespace    http://tampermonkey.net/
-// @version      2.16
-// @description  支持关键词屏蔽 + 动态更新 + 开关切换不刷新 + Base64 内容自动解码 + 回复框编辑/预览 + 图片粘贴上传
-// @author       YourName
+// @namespace    https://github.com/netcaty
+// @version      2.17
+// @description  按关键词屏蔽 V2EX 帖子，支持隐藏/移除/模糊、开关即时生效、Base64 自动解码、回复框预览与图片粘贴上传
+// @author       netcaty
+// @license      MIT
+// @homepageURL  https://github.com/netcaty/dotfiles
+// @supportURL   https://github.com/netcaty/dotfiles/issues
 // @match        *://*.v2ex.com/*
 // @grant        GM_getValue
 // @grant        GM_setValue
-// @updateURL    https://raw.githubusercontent.com/netcaty/dotfiles/main/script.meta.js
-// @downloadURL  https://raw.githubusercontent.com/netcaty/dotfiles/main/script.user.js
+// @connect      api.imgur.com
+// @run-at       document-idle
 // ==/UserScript==
 
 (function() {
@@ -17,7 +20,9 @@
 
     // 默认配置
     const defaultConfig = {
-        keywords: ['结婚', '彩礼', '婚礼'],
+        // 公开发布版本默认不预置关键词，避免替用户预设立场；
+        // 想保留原来的默认值就改回：['结婚', '彩礼', '婚礼']
+        keywords: [],
         blockMode: 'hide',
         enabled: true,
         decodeBase64: true,
@@ -29,7 +34,9 @@
     };
 
     // 当前版本号（显示在设置面板标题旁，便于确认更新是否生效）
-    const SCRIPT_VERSION = '2.16';
+    // 直接读脚本元数据，改 @version 时不必再同步这里
+    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info &&
+                            GM_info.script && GM_info.script.version) || '0.0.0';
 
     // 存储兼容层：Userscripts（iOS Safari）只提供异步的 GM.getValue/GM.setValue，
     // 不支持同步 GM_getValue/GM_setValue，该环境下回落到 localStorage
@@ -243,12 +250,18 @@
         config.keywords.forEach((keyword, index) => {
             const div = document.createElement('div');
             div.style = "display:flex;justify-content:space-between;margin:2px 0;";
-            div.innerHTML = `
-                <span>${keyword}</span>
+            // 关键词是用户输入，用 textContent 写入，避免拼进 innerHTML 造成注入
+            const name = document.createElement('span');
+            name.textContent = keyword;
 
-                <button class="delete-btn" data-index="${index}"
-                        style="font-size:12px;padding:2px 5px;">删除</button>
-            `;
+            const del = document.createElement('button');
+            del.className = 'delete-btn';
+            del.dataset.index = String(index);
+            del.style.cssText = 'font-size:12px;padding:2px 5px;';
+            del.textContent = '删除';
+
+            div.appendChild(name);
+            div.appendChild(del);
             container.appendChild(div);
         });
 
@@ -324,9 +337,8 @@
             const shouldBlock = lowerCaseKeywords.some(keyword => title.includes(keyword));
 
             if (shouldBlock) {
-                // 如果包含，则隐藏整个帖子项
+                // 如果包含，则屏蔽整个帖子项
                 applyBlockStyle(item, config.blockMode);
-                console.log(`已屏蔽: ${link.href}`);
             }
         });
     }
@@ -478,7 +490,6 @@
         const newText = text.replace(BASE64_TOKEN_RE, (match, pre, token) => {
             const decoded = decodeBase64Text(token);
             if (decoded !== null) {
-                console.log('Base64 解码:', token, '→', decoded);
                 return pre + decoded;
             }
             return match;
