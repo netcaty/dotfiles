@@ -3,7 +3,7 @@
 // @name:zh-CN   Archive.org 归档助手
 // @name:en      Archive.org Snapshot Helper
 // @namespace    https://github.com/netcaty
-// @version      0.8.4
+// @version      0.8.5
 // @description  One-click archive of the current page (logged-in content included) as a self-contained single-file HTML, with optional upload to archive.org for permanent storage. Can redact personal info such as nicknames and avatars before archiving.
 // @description:zh-CN 一键归档当前页面（包括已登录的页面），打包成自包含单文件 HTML，并可一键上传 archive.org 永久保存。支持在归档前标注并打码昵称、头像等个人信息。
 // @description:en One-click archive of the current page (logged-in content included) as a self-contained single-file HTML, with optional upload to archive.org for permanent storage. Can redact personal info such as nicknames and avatars before archiving.
@@ -1344,6 +1344,7 @@ ${cloneHtml}
     el.style.cssText = `
       position: absolute; right: 0; bottom: 50px;
       width: 340px; max-width: calc(100vw - 32px);
+      max-height: calc(100vh - 120px); flex-direction: column;
       background: #fff; color: #1f2329; border-radius: 12px;
       box-shadow: 0 12px 40px rgba(0,0,0,.28); border: 1px solid rgba(0,0,0,.06);
       font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -1356,21 +1357,36 @@ ${cloneHtml}
     const keepLocal = getKeepLocal();
     const shotsOn = getShots();
     const redactOn = getRedactEnabled();
+    // 还没配过 Key 就把这一段展开（首次使用要引导）；配过就收起，面板只留一行摘要。
+    const keyOpen = !(access || secret);
 
     el.innerHTML = `
       <style>
-        .hd { padding: 12px 16px; font-weight: 700; font-size: 14px; border-bottom: 1px solid #eceef1; }
-        .bd { padding: 14px 16px; max-height: min(66vh, 560px); overflow-y: auto; }
-        .row { margin-bottom: 12px; }
+        .hd { padding: 12px 16px; font-weight: 700; font-size: 14px; border-bottom: 1px solid #eceef1; flex: 0 0 auto; }
+        .bd { padding: 12px 14px; flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+        .row { margin-bottom: 10px; }
         label { display: block; font-size: 12px; color: #646a73; margin-bottom: 6px; }
         input[type=text], input[type=password] {
           width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid #d0d3d9;
           border-radius: 8px; font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace; outline: none;
         }
         input[type=text]:focus, input[type=password]:focus { border-color: #2d6cdf; box-shadow: 0 0 0 3px rgba(45,108,223,.12); }
-        .sw { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 0 2px; }
+        .sw { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 0 1px; }
         .sw .txt { font-size: 13px; }
         .sw .sub { font-size: 11px; color: #8a9099; margin-top: 2px; }
+        /* 折叠区：S3 Key / 打码规则都是「配一次就不动」，默认收起，只留一行摘要 */
+        details { border-top: 1px solid #f0f1f3; margin-top: 8px; }
+        details:first-of-type { border-top: 0; margin-top: 0; }
+        summary { list-style: none; cursor: pointer; padding: 8px 0; display: flex; align-items: center; gap: 8px; font-size: 13px; user-select: none; }
+        summary::-webkit-details-marker { display: none; }
+        summary::marker { content: ''; }
+        summary:hover .lb { color: #2d6cdf; }
+        summary .lb { font-weight: 600; }
+        summary .badge { font-size: 11px; font-weight: 400; color: #8a9099; }
+        summary .badge.warn { color: #d46b08; }
+        summary .chev { margin-left: auto; color: #a3a8b0; font-size: 12px; transition: transform .15s; }
+        details[open] > summary .chev { transform: rotate(90deg); }
+        .sec { padding: 0 0 8px; }
         .toggle { position: relative; width: 40px; height: 22px; flex: 0 0 auto; }
         .toggle input { opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
         .slider { position: absolute; inset: 0; background: #cfd3d9; border-radius: 11px; transition: background .15s; pointer-events: none; }
@@ -1379,7 +1395,7 @@ ${cloneHtml}
         .toggle input:checked + .slider { background: #2d6cdf; }
         .toggle input:checked + .slider::after { transform: translateX(18px); }
         .hint { font-size: 11px; color: #8a9099; margin-top: 8px; line-height: 1.6; }
-        .hint a { color: #2d6cdf; }
+        .hint a { color: #2d6cdf; white-space: nowrap; } /* 别让「打开上次归档 ↗」被拆成两行 */
         .rlist { font: 11px/1.5 ui-monospace, Menlo, Consolas, monospace; color: #646a73; }
         .ritem { display: flex; align-items: center; gap: 6px; background: #f6f7f9;
           border-radius: 6px; padding: 5px 6px 5px 8px; margin-bottom: 4px; }
@@ -1387,7 +1403,7 @@ ${cloneHtml}
         .ritem .del { background: transparent; color: #d4380d; padding: 2px 4px; font-weight: 700; font-size: 12px; }
         .empty { color: #8a9099; font-size: 11px; padding: 0 0 6px; }
         .pick { background: #eef3fd; color: #2d6cdf; width: 100%; margin-top: 2px; }
-        .ft { padding: 10px 16px; border-top: 1px solid #eceef1; display: flex; align-items: center; gap: 8px; }
+        .ft { padding: 10px 16px; border-top: 1px solid #eceef1; display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
         .status { font-size: 11px; color: #8a9099; flex: 1; }
         button { border: 0; border-radius: 8px; padding: 8px 14px; font-size: 12px; font-weight: 600; cursor: pointer; }
         .clear { background: transparent; color: #d4380d; padding: 8px 6px; }
@@ -1395,18 +1411,27 @@ ${cloneHtml}
       </style>
       <div class="hd">网页快照 · 设置</div>
       <div class="bd">
-        <div class="row">
-          <label>archive.org S3 Access Key</label>
-          <input id="access" type="text" spellcheck="false" autocomplete="off" placeholder="Access Key" value="${escapeAttr(access)}">
-        </div>
-        <div class="row">
-          <label>archive.org S3 Secret Key</label>
-          <input id="secret" type="password" spellcheck="false" autocomplete="off" placeholder="Secret Key" value="${escapeAttr(secret)}">
-        </div>
+        <details id="keysec"${keyOpen ? ' open' : ''}>
+          <summary><span class="lb">archive.org S3 Key</span><span class="badge" id="keybadge"></span><span class="chev">›</span></summary>
+          <div class="sec">
+            <div class="row">
+              <label>Access Key</label>
+              <input id="access" type="text" spellcheck="false" autocomplete="off" placeholder="Access Key" value="${escapeAttr(access)}">
+            </div>
+            <div class="row">
+              <label>Secret Key</label>
+              <input id="secret" type="password" spellcheck="false" autocomplete="off" placeholder="Secret Key" value="${escapeAttr(secret)}">
+            </div>
+            <div class="hint">
+              Key 到 <a href="https://archive.org/account/s3.php" target="_blank" rel="noreferrer">archive.org/account/s3.php</a> 免费申请。
+              保存在 Tampermonkey 本地存储，更新脚本不会丢失。
+            </div>
+          </div>
+        </details>
         <div class="sw">
           <div>
             <div class="txt">仅下载到本地</div>
-            <div class="sub">开启后，快照仅保存到本地，不上传 archive.org</div>
+            <div class="sub">开启后，快照只保存到本地，不上传</div>
           </div>
           <span class="toggle">
             <input id="dlonly" type="checkbox" ${dlOnly ? 'checked' : ''}>
@@ -1416,7 +1441,7 @@ ${cloneHtml}
         <div class="sw">
           <div>
             <div class="txt">存档后同时下载本地副本</div>
-            <div class="sub">开启后，上传 archive.org 的同时再下载一份到本地</div>
+            <div class="sub">开启后，上传的同时再存一份到本地</div>
           </div>
           <span class="toggle">
             <input id="keeplocal" type="checkbox" ${keepLocal ? 'checked' : ''}>
@@ -1426,33 +1451,34 @@ ${cloneHtml}
         <div class="sw">
           <div>
             <div class="txt">存档时生成整页截图</div>
-            <div class="sub">开启后，archive.org 详情页可直接翻页预览快照，无需回放工具</div>
+            <div class="sub">开启后，详情页可直接翻页预览</div>
           </div>
           <span class="toggle">
             <input id="shots" type="checkbox" ${shotsOn ? 'checked' : ''}>
             <span class="slider"></span>
           </span>
         </div>
-        <div class="sw">
-          <div>
-            <div class="txt">归档时打码隐私信息</div>
-            <div class="sub">仅对下方已标注的区域生效，WARC 与截图同时打码</div>
+        <details id="redactsec">
+          <summary><span class="lb">打码隐私信息</span><span class="badge" id="redactbadge"></span><span class="chev">›</span></summary>
+          <div class="sec">
+            <div class="sw">
+              <div>
+                <div class="txt">归档时打码隐私信息</div>
+                <div class="sub">仅对下方已标注的区域生效</div>
+              </div>
+              <span class="toggle">
+                <input id="redact" type="checkbox" ${redactOn ? 'checked' : ''}>
+                <span class="slider"></span>
+              </span>
+            </div>
+            <div class="row" style="margin-top:8px;">
+              <label>本域名的打码区域（<span id="redacthost"></span>）</label>
+              <div class="rlist" id="redactlist"></div>
+              <button class="pick" id="pick" type="button">+ 在页面上点选打码区域</button>
+            </div>
           </div>
-          <span class="toggle">
-            <input id="redact" type="checkbox" ${redactOn ? 'checked' : ''}>
-            <span class="slider"></span>
-          </span>
-        </div>
-        <div class="row" style="margin-top:10px;">
-          <label>本域名的打码区域（<span id="redacthost"></span>）</label>
-          <div class="rlist" id="redactlist"></div>
-          <button class="pick" id="pick" type="button">+ 在页面上点选打码区域</button>
-        </div>
-        <div class="hint">
-          Key 到 <a href="https://archive.org/account/s3.php" target="_blank" rel="noreferrer">archive.org/account/s3.php</a> 免费申请。
-          保存在 Tampermonkey 本地存储，更新脚本不会丢失。
-        </div>
-        <div class="hint" id="lastresult" style="border-top:1px solid #f0f1f3;padding-top:8px;margin-top:10px;"></div>
+        </details>
+        <div class="hint" id="lastresult" style="border-top:1px solid #f0f1f3;padding-top:8px;margin-top:8px;"></div>
       </div>
       <div class="ft">
         <span class="status" id="status"></span>
@@ -1489,10 +1515,26 @@ ${cloneHtml}
       }
     })();
 
+    // 折叠区的摘要状态：收起时也要能看出「配没配 Key」「打码开没开、本域名几条」
+    function refreshBadges() {
+      const kb = $('keybadge');
+      const hasKey = Boolean(getAccessKey() && getSecretKey());
+      kb.textContent = hasKey ? '已配置' : '未配置';
+      kb.className = 'badge' + (hasKey ? '' : ' warn');
+
+      const rb = $('redactbadge');
+      const n = getRedactList(redactHost()).length;
+      const on = getRedactEnabled();
+      rb.textContent = on ? `已开启 · 本域名 ${n} 条` : (n ? `已关闭 · 本域名 ${n} 条` : '已关闭');
+      rb.className = 'badge' + (on && !n ? ' warn' : '');
+    }
+    refreshBadges();
+
     // 打码区域列表：按当前域名展示，可逐条删除
     function refreshRedact() {
       const host = redactHost();
       $('redacthost').textContent = host;
+      refreshBadges(); // 列表变了，收起状态的摘要要跟着走（放在前面，别被下面的 return 跳过）
       const box = $('redactlist');
       box.textContent = '';
       const list = getRedactList(host);
@@ -1530,6 +1572,7 @@ ${cloneHtml}
     $('redact').addEventListener('change', () => {
       const on = $('redact').checked;
       const okFlag = setRedactEnabled(on);
+      refreshBadges();
       $('status').textContent = okFlag
         ? (on ? '✓ 归档时会对已标注区域打码' : '✓ 已关闭打码，归档会保留原样')
         : '保存失败：GM_setValue 不可用';
@@ -1603,6 +1646,7 @@ ${cloneHtml}
       const okShots = setShots($('shots').checked);
       const okRedact = setRedactEnabled($('redact').checked);
       if (!okKey || !okFlag || !okKeep || !okShots || !okRedact) { $('status').textContent = '保存失败：GM_setValue 不可用'; return; }
+      refreshBadges();
       let msg;
       if (only) msg = '✓ 已保存（仅下载到本地）';
       else if (a && s) msg = '✓ 已保存，存档时将上传 archive.org';
@@ -1730,7 +1774,7 @@ ${cloneHtml}
     let hideTimer = null;
     const show = () => {
       if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
-      panel.el.style.display = 'block';
+      panel.el.style.display = 'flex'; // 面板是 flex 列：头部/底部固定，只有 .bd 滚动
     };
     const scheduleHide = () => {
       if (hideTimer) clearTimeout(hideTimer);
