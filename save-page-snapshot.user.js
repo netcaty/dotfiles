@@ -1,12 +1,12 @@
 // ==UserScript==
-// @name         网页快照 · 登录态页面一键归档
-// @name:zh-CN   网页快照 · 登录态页面一键归档
-// @name:en      Webpage Snapshot · Archive Logged-in Pages
+// @name         Archive.org Snapshot Helper
+// @name:zh-CN   Archive.org 归档助手
+// @name:en      Archive.org Snapshot Helper
 // @namespace    https://github.com/netcaty
-// @version      0.8.1
-// @description  把当前已登录页面（所见即所得）打包成自包含单文件 HTML，并可一键上传 archive.org 永久保存，附在线回放直链。
-// @description:zh-CN 把当前已登录页面（所见即所得）打包成自包含单文件 HTML，并可一键上传 archive.org 永久保存，附在线回放直链。
-// @description:en One-click archive of the page you are logged into: self-contained HTML, optional WARC upload to archive.org, plus a ReplayWeb.page replay link.
+// @version      0.8.2
+// @description  One-click archive of the current page (logged-in content included) as a self-contained single-file HTML, with optional upload to archive.org for permanent storage.
+// @description:zh-CN 一键归档当前页面（包括已登录的页面），打包成自包含单文件 HTML，并可一键上传 archive.org 永久保存。
+// @description:en One-click archive of the current page (logged-in content included) as a self-contained single-file HTML, with optional upload to archive.org for permanent storage.
 // @author       netcat
 // @license      MIT
 // @homepageURL  https://github.com/netcaty/dotfiles
@@ -21,9 +21,9 @@
 // @connect      s3.us.archive.org
 // @connect      archive.org
 // @connect      *
-// @compatible   chrome  需要 Tampermonkey / Violentmonkey
-// @compatible   edge    需要 Tampermonkey / Violentmonkey
-// @compatible   firefox 需要 Tampermonkey / Violentmonkey（Greasemonkey 4 不支持 GM_xmlhttpRequest）
+// @compatible   chrome  Requires Tampermonkey or Violentmonkey
+// @compatible   edge    Requires Tampermonkey or Violentmonkey
+// @compatible   firefox Requires Tampermonkey or Violentmonkey (Greasemonkey 4 lacks GM_xmlhttpRequest)
 // ==/UserScript==
 //
 // 关于 @connect *：抓取页面里的跨域图片 / CSS 需要它。页面内 fetch 受 CORS 限制
@@ -54,6 +54,11 @@
   const IA_COLLECTION = 'opensource'; // 个人上传公开集合
   const IA_MEDIATYPE_WEB = 'web';     // 纯 WARC：语义正确，但 IA 详情页就是 "No Preview Available"
   const IA_MEDIATYPE_IMAGE = 'image'; // 带截图：详情页走 BookReader 图片查看器，可翻页
+
+  // 写进 archive.org item description 的工具署名，方便从归档反查是哪来的。
+  // URL 不带语言前缀：GF 会按访客语言自动重定向（实测 /zh-CN/ 与 /en/ 都是 301 到同一页）。
+  const TOOL_NAME = 'Archive.org Snapshot Helper';
+  const TOOL_URL = 'https://greasyfork.org/scripts/595193';
 
   // 截图相关上限
   const SHOT_WIDTH = 1280;   // 渲染宽度（px）
@@ -158,7 +163,7 @@
   }
 
   // ---------- 工具 ----------
-  const log = (...a) => console.log('[SavePageSnapshot]', ...a);
+  const log = (...a) => console.log(`[${TOOL_NAME}]`, ...a);
 
   // 生成文件名的干净时间戳
   function timestamp() {
@@ -642,13 +647,13 @@
     // ① warcinfo 记录：描述本次抓取
     const warcinfoId = ID();
     const warcinfoBody =
-      `software: SavePageSnapshot-userscript\r\n` +
+      `software: ${TOOL_NAME} (userscript)\r\n` +
       `format: WARC File Format 1.1\r\n` +
       `conformsTo: http://iipc.github.io/warc-specifications/specifications/warc-format/warc-1.1/\r\n` +
       `robots: ignore\r\n` +
       `hostname: ${location.hostname}\r\n` +
       `ip: ${ip}\r\n` +
-      `operator: SavePageSnapshot\r\n` +
+      `operator: ${TOOL_NAME}\r\n` +
       `isPartOf: self-archive snapshot\r\n`;
     const warcinfo = warcRecord(
       'WARC/1.1',
@@ -804,7 +809,7 @@
       const blob = (body instanceof Blob) ? body : new Blob([body], { type: ct });
 
       const url = `https://s3.us.archive.org/${encodeURIComponent(identifier)}/${encodeURIComponent(filename)}`;
-      const title = (document.title || location.hostname + ' 快照').slice(0, 200);
+      const title = (document.title || location.hostname + ' - snapshot').slice(0, 200);
       const headers = {
         'Authorization': `LOW ${cleanKey()}:${cleanSecret()}`,
         'x-archive-auto-make-bucket': '1',
@@ -816,10 +821,10 @@
         'x-archive-meta-mediatype': opts.mediatype || IA_MEDIATYPE_WEB,
         'x-archive-meta-collection': IA_COLLECTION,
         'x-archive-meta-title': metaVal(title),
-        'x-archive-meta-description': metaVal(opts.description || ('网页快照，由 SavePageSnapshot 生成。原址: ' + location.href)),
+        'x-archive-meta-description': metaVal(opts.description || `Archived with ${TOOL_NAME}. Tool: ${TOOL_URL} | Original page: ${location.href}`),
         'x-archive-meta-subject': metaVal('web archive; snapshot; warc'),
         'x-archive-meta-originalurl': metaVal(location.href),
-        'x-archive-meta-scanner': 'SavePageSnapshot-userscript',
+        'x-archive-meta-scanner': `${TOOL_NAME} (userscript)`,
         'Content-Type': ct,
       };
       // 注意：不要传 x-archive-meta-noindex。IA 对 noindex 是"看字段有无"而不是"看值"，
@@ -1045,7 +1050,7 @@
     const charset = clone.getAttribute('charset') || document.characterSet || 'UTF-8';
 
     const html = `<!DOCTYPE html>
-<!-- Saved by SavePageSnapshot @ ${new Date().toISOString()}
+<!-- Saved by ${TOOL_NAME} @ ${new Date().toISOString()}
    Original URL: ${location.href} -->
 <html${clone.getAttribute('lang') ? ` lang="${clone.getAttribute('lang')}"` : ''}>
 <head>
@@ -1424,7 +1429,7 @@ ${cloneHtml}
       ({ html, filename } = await buildSnapshot());
     } catch (e) {
       log('构建失败', e);
-      alert('[SavePageSnapshot] 构建快照失败：' + e.message);
+      alert(`[${TOOL_NAME}] 构建快照失败：` + e.message);
       return;
     }
 
@@ -1491,9 +1496,11 @@ ${cloneHtml}
     // 3c) mediatype：有截图才设 image —— 详情页才有 BookReader 图片预览；
     //     没截图时设 web（语义正确，虽然详情页仍是 "No Preview Available"）。
     const mediatype = shots.length ? IA_MEDIATYPE_IMAGE : IA_MEDIATYPE_WEB;
+    // 刻意保持纯 ASCII：metaVal 只对含非 ASCII 的值做 uri() 编码，
+    // 全 ASCII 就不会被编码，archive.org 详情页显示最稳（原页 URL 含中文时仍会自动编码）。
     const desc = shots.length
-      ? `网页快照（WARC 归档 + ${shots.length} 张整页截图），由 SavePageSnapshot 生成。原址: ` + location.href
-      : '网页快照(WARC 单记录归档)，由 SavePageSnapshot 生成。原址: ' + location.href;
+      ? `Archived with ${TOOL_NAME} - WARC 1.1 + ${shots.length} full-page screenshots. Tool: ${TOOL_URL} | Original page: ${location.href}`
+      : `Archived with ${TOOL_NAME} - WARC 1.1. Tool: ${TOOL_URL} | Original page: ${location.href}`;
 
     log('开始上传，identifier=', identifier, 'file=', upName, 'type=', ct, 'mediatype=', mediatype);
     setFab('上传中…');
