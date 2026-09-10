@@ -1,0 +1,7 @@
+# CDP / 本地验证脚本，不入库
+test_*.cjs
+node_modules/
+
+# 临时产物
+meta.json
+*.log
