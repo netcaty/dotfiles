@@ -3,7 +3,7 @@
 // @name:zh-CN   Archive.org 归档助手
 // @name:en      Archive.org Snapshot Helper
 // @namespace    https://github.com/netcaty
-// @version      0.8.2
+// @version      0.8.3
 // @description  One-click archive of the current page (logged-in content included) as a self-contained single-file HTML, with optional upload to archive.org for permanent storage.
 // @description:zh-CN 一键归档当前页面（包括已登录的页面），打包成自包含单文件 HTML，并可一键上传 archive.org 永久保存。
 // @description:en One-click archive of the current page (logged-in content included) as a self-contained single-file HTML, with optional upload to archive.org for permanent storage.
