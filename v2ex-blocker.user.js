@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         v2ex屏蔽器
 // @namespace    https://github.com/netcaty
-// @version      2.17
-// @description  按关键词屏蔽 V2EX 帖子，支持隐藏/移除/模糊、开关即时生效、Base64 自动解码、回复框预览与图片粘贴上传
+// @version      2.18
+// @description  按关键词屏蔽 V2EX 帖子，支持隐藏/折叠/模糊、开关即时生效、Base64 自动解码、回复框预览与图片粘贴上传
 // @author       netcaty
 // @license      MIT
 // @homepageURL  https://github.com/netcaty/dotfiles
@@ -156,7 +156,7 @@
                 <label>屏蔽方式：
                     <select id="block-mode" style="width:100%;margin-top:5px;">
                         <option value="hide" ${config.blockMode === 'hide' ? 'selected' : ''}>隐藏</option>
-                        <option value="remove" ${config.blockMode === 'remove' ? 'selected' : ''}>移除</option>
+                        <option value="collapse" ${config.blockMode === 'collapse' ? 'selected' : ''}>折叠</option>
                         <option value="blur" ${config.blockMode === 'blur' ? 'selected' : ''}>模糊</option>
                     </select>
                 </label>
@@ -353,21 +353,57 @@
         return null;
     }
 
-    // 已屏蔽元素（hide/blur 模式）与已移除元素（remove 模式暂存），关闭开关时用于还原
+    // 已屏蔽元素（hide/blur 模式）与已折叠元素（collapse 模式），关闭开关时用于还原
     const blockedItems = new Set();
-    const removedItems = [];
+    const collapsedItems = new Set();
+    const collapseState = new WeakMap();
+
+    // 折叠：整行收起，原位留一条带箭头的折叠条；点一下展开看原文，再点收回
+    function collapseElement(element) {
+        // MutationObserver 会反复触发，已折叠过的不要重复插入折叠条
+        if (collapseState.has(element)) return;
+
+        const link = element.querySelector(config.rowSelector);
+        const title = ((link && link.innerText) || '').trim();
+        const shortTitle = title.length > 40 ? title.slice(0, 40) + '…' : title;
+
+        const bar = document.createElement('div');
+        bar.className = 'v2ex-blocker-collapsed';
+        bar.style.cssText = 'display:flex;align-items:center;gap:6px;padding:6px 10px;' +
+            'background:#f7f7f7;border:1px solid #e2e2e2;border-radius:3px;' +
+            'color:#999;font-size:12px;line-height:1.4;cursor:pointer;user-select:none;';
+        bar.title = '点击展开 / 收起';
+
+        const arrow = document.createElement('span');
+        arrow.textContent = '▶';
+        arrow.style.cssText = 'display:inline-block;font-size:10px;transition:transform .15s;';
+
+        const label = document.createElement('span');
+        label.textContent = '已折叠：' + shortTitle;
+
+        bar.appendChild(arrow);
+        bar.appendChild(label);
+
+        element.style.display = 'none';
+        element.parentNode.insertBefore(bar, element);
+
+        const state = { bar, arrow, label, title: shortTitle, expanded: false };
+        collapseState.set(element, state);
+        collapsedItems.add(element);
+
+        bar.addEventListener('click', () => {
+            state.expanded = !state.expanded;
+            element.style.display = state.expanded ? '' : 'none';
+            arrow.style.transform = state.expanded ? 'rotate(90deg)' : '';
+            label.textContent = (state.expanded ? '已展开：' : '已折叠：') + state.title;
+        });
+    }
 
     // 应用屏蔽样式
     function applyBlockStyle(element, mode) {
         switch(mode) {
-            case 'remove':
-                // 先暂存节点，关闭屏蔽时能还原
-                removedItems.push({
-                    parent: element.parentNode,
-                    nextSibling: element.nextSibling,
-                    node: element
-                });
-                element.remove();
+            case 'collapse':
+                collapseElement(element);
                 break;
             case 'blur':
                 blockedItems.add(element);
@@ -387,12 +423,16 @@
             el.style.filter = '';
         });
         blockedItems.clear();
-        while (removedItems.length) {
-            const { parent, nextSibling, node } = removedItems.pop();
-            if (parent && parent.isConnected) {
-                parent.insertBefore(node, nextSibling);
+
+        collapsedItems.forEach(el => {
+            const state = collapseState.get(el);
+            if (state) {
+                if (state.bar) state.bar.remove();
+                collapseState.delete(el);
             }
-        }
+            el.style.display = '';
+        });
+        collapsedItems.clear();
     }
 
     // ==================== Base64 内容自动解码 ====================
