@@ -363,10 +363,6 @@
         // MutationObserver 会反复触发，已折叠过的不要重复插入折叠条
         if (collapseState.has(element)) return;
 
-        const link = element.querySelector(config.rowSelector);
-        const title = ((link && link.innerText) || '').trim();
-        const shortTitle = title.length > 40 ? title.slice(0, 40) + '…' : title;
-
         const bar = document.createElement('div');
         bar.className = 'v2ex-blocker-collapsed';
         bar.style.cssText = 'display:flex;align-items:center;gap:6px;padding:6px 10px;' +
@@ -379,7 +375,7 @@
         arrow.style.cssText = 'display:inline-block;font-size:10px;transition:transform .15s;';
 
         const label = document.createElement('span');
-        label.textContent = '已折叠：' + shortTitle;
+        label.textContent = '已折叠';
 
         bar.appendChild(arrow);
         bar.appendChild(label);
@@ -387,7 +383,7 @@
         element.style.display = 'none';
         element.parentNode.insertBefore(bar, element);
 
-        const state = { bar, arrow, label, title: shortTitle, expanded: false };
+        const state = { bar, arrow, label, expanded: false };
         collapseState.set(element, state);
         collapsedItems.add(element);
 
@@ -395,7 +391,7 @@
             state.expanded = !state.expanded;
             element.style.display = state.expanded ? '' : 'none';
             arrow.style.transform = state.expanded ? 'rotate(90deg)' : '';
-            label.textContent = (state.expanded ? '已展开：' : '已折叠：') + state.title;
+            label.textContent = state.expanded ? '已展开' : '已折叠';
         });
     }
 
