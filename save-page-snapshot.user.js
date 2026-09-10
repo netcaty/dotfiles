@@ -719,6 +719,19 @@
     return /[^\x00-\x7F]/.test(v) ? 'uri(' + encodeURIComponent(String(v)) + ')' : String(v);
   }
 
+  // 取原页自己的摘要，用作 archive.org item 的 description。
+  // 为什么不用自己拼的句子：item 详情页会被搜索引擎收录，用原页摘要能直接对上原主题，
+  // 比 "Archived with xxx" 这种通用句更容易被正确归类。
+  // 优先 <meta name="description">，其次 og:description；压平空白、截断到 500 字。
+  function readPageDescription() {
+    const pick = (sel) => {
+      const el = document.querySelector(sel);
+      return el ? (el.getAttribute('content') || '') : '';
+    };
+    const txt = pick('meta[name="description"]') || pick('meta[property="og:description"]');
+    return String(txt).replace(/\s+/g, ' ').trim().slice(0, 500);
+  }
+
   // 生成合法、尽量唯一的 item identifier
   function makeIdentifier() {
     let host = (location.hostname || 'page').replace(/[^a-z0-9-]/gi, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').toLowerCase();
@@ -821,10 +834,11 @@
         'x-archive-meta-mediatype': opts.mediatype || IA_MEDIATYPE_WEB,
         'x-archive-meta-collection': IA_COLLECTION,
         'x-archive-meta-title': metaVal(title),
-        'x-archive-meta-description': metaVal(opts.description || `Archived with ${TOOL_NAME}. Tool: ${TOOL_URL} | Original page: ${location.href}`),
+        'x-archive-meta-description': metaVal(opts.description || readPageDescription() || `Archived with ${TOOL_NAME}. Tool: ${TOOL_URL}`),
         'x-archive-meta-subject': metaVal('web archive; snapshot; warc'),
         'x-archive-meta-originalurl': metaVal(location.href),
-        'x-archive-meta-scanner': `${TOOL_NAME} (userscript)`,
+        // scanner 直接写脚本发布页：IA 会把 http(s) 值渲染成链接，从 item 页一键回到脚本主页
+        'x-archive-meta-scanner': TOOL_URL,
         'Content-Type': ct,
       };
       // 注意：不要传 x-archive-meta-noindex。IA 对 noindex 是"看字段有无"而不是"看值"，
@@ -1496,11 +1510,12 @@ ${cloneHtml}
     // 3c) mediatype：有截图才设 image —— 详情页才有 BookReader 图片预览；
     //     没截图时设 web（语义正确，虽然详情页仍是 "No Preview Available"）。
     const mediatype = shots.length ? IA_MEDIATYPE_IMAGE : IA_MEDIATYPE_WEB;
-    // 刻意保持纯 ASCII：metaVal 只对含非 ASCII 的值做 uri() 编码，
-    // 全 ASCII 就不会被编码，archive.org 详情页显示最稳（原页 URL 含中文时仍会自动编码）。
-    const desc = shots.length
+    // description 优先用原页自己的摘要（SEO：item 详情页被收录时能直接对上原主题）；
+    // 原页没写 meta description 时才退回工具署名句。非 ASCII 由 metaVal 统一 uri() 编码。
+    const pageDesc = readPageDescription();
+    const desc = pageDesc || (shots.length
       ? `Archived with ${TOOL_NAME} - WARC 1.1 + ${shots.length} full-page screenshots. Tool: ${TOOL_URL} | Original page: ${location.href}`
-      : `Archived with ${TOOL_NAME} - WARC 1.1. Tool: ${TOOL_URL} | Original page: ${location.href}`;
+      : `Archived with ${TOOL_NAME} - WARC 1.1. Tool: ${TOOL_URL} | Original page: ${location.href}`);
 
     log('开始上传，identifier=', identifier, 'file=', upName, 'type=', ct, 'mediatype=', mediatype);
     setFab('上传中…');
