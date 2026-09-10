@@ -1,4 +1,4 @@
-# 网页快照 · 登录态页面一键归档
+# Archive.org 归档助手（Archive.org Snapshot Helper）
 
 把**当前浏览器里已登录、所见即所得**的页面，一键打包成自包含的单文件 HTML，需要时再上传 archive.org 永久保存。
 
@@ -12,14 +12,28 @@
 - **上传 archive.org**：浏览器内自建标准 **WARC 1.1** 并 PUT 到 IA 的 S3 接口，item 内同时可附整页分片截图，让详情页直接**可翻页预览**（`mediatype=image` → BookReader）。
 - **在线回放直链**：成功后给出 [ReplayWeb.page](https://replayweb.page/) 回放地址（走 `archive.org/cors/` 端点，否则会被 CORS 拦）。
 - **上传结果不靠猜**：PUT 响应不明朗时会复验 `archive.org/metadata/<id>`，确认 item 存在就判成功，不会白白重传。
+- **归档前打码隐私信息**（可选，默认关）：点选一次昵称 / 头像之类的区域，规则按域名记住，之后每次归档自动抹掉。
 
-## 怎么用
+## 打码怎么用
+
+1. 鼠标悬浮右下角按钮展开设置面板，找到「归档时打码隐私信息」，点「**在页面上点选打码区域**」。
+2. 鼠标移到要打码的元素上（会有红框提示），点一下。`Esc` 取消。
+3. 规则按**当前域名**存进脚本管理器，同一站点长期有效；面板里可以逐条删除。
+
+几个说明：
+
+- 打码**同时作用于 WARC 和整页截图**。只对截图做马赛克没有意义 —— 回放里照样能选中、复制那段文本。
+- 处理方式是**整块替换成同尺寸纯色块**，不是盖一层糊。被抹掉元素的 `src` / `href` 等属性一并消失，不会留下能从头像 URL 反查用户身份的痕迹。
+- 站点改版后选择器可能失效。此时归档结果里会明确提示「已开启打码但本页没有命中任何标注区域」，不会静默放过。
+
+## 怎么用（基础）
 
 1. 装好后任意页面右下角出现「存档本页」按钮，**鼠标悬浮**即展开设置面板（点页面空白处收起）。
-2. 三个开关，切换即时生效：
+2. 四个开关，切换即时生效：
    - **仅下载到本地**（默认开）：只存本地，不上传。
    - **存档后同时下载本地副本**（默认关）：关掉时上传成功不再弹保存框。
    - **整页截图**（默认开）：让 archive.org 详情页可直接翻页看。
+   - **归档时打码隐私信息**（默认关）：见上一节。
 3. 要上传就去 [archive.org/account/s3.php](https://archive.org/account/s3.php) 申请 Access / Secret Key，填进设置面板（存在脚本管理器里，更新脚本不丢）。
 
 ## 已知限制
@@ -27,14 +41,20 @@
 - **回放里图片是否正常，只取决于有没有内联成 data URI**。WARC 只有 HTML 一条记录，ReplayWeb 不回源，残留外链一律坏图。所以「本地打开图片正常」不等于「归档成功」。
 - 截图走 SVG `foreignObject` 重绘，不是像素级复制：外部 `@font-face` 字体会回退，`sticky` / `fixed` 元素按静态位置渲染。**截图只当预览，保真件是 WARC。**
 - archive.org 的 "No Preview Available" 是政策限制：含 WARC 的 item 必须位于白名单集合才会进 Wayback 索引，普通用户无权上传。本脚本用「WARC + 分片截图 + `mediatype=image`」绕开它。
+- 打码只处理你**点选到的那一块**。同一份用户 id 若还散落在别处（页面底部「当前登录：xxx」、评论区你自己的楼层、CSS 里的背景图 URL），需要各自标注。
 - 需要 `@connect *`：抓任意图床域名，无法收敛成固定域名白名单。
 
 ## 权限说明
 
 - `GM_xmlhttpRequest`：内联跨域资源 + 上传 archive.org。
-- `GM_getValue / GM_setValue`：保存 S3 key 与开关状态。
+- `GM_getValue / GM_setValue`：保存 S3 key、开关状态与打码规则。
 - `GM_notification`：存档结果提醒（主要反馈已改为页内浮层）。
 - 不收集、不上传任何数据到你填写的 archive.org 之外的第三方；S3 key 只存在本机脚本管理器里。
+
+## 从哪更新
+
+- GreasyFork：<https://greasyfork.org/scripts/595193>
+- GitHub raw：<https://raw.githubusercontent.com/netcaty/dotfiles/main/save-page-snapshot.user.js>
 
 ## 许可证
 

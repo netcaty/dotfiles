@@ -3,10 +3,10 @@
 // @name:zh-CN   Archive.org 归档助手
 // @name:en      Archive.org Snapshot Helper
 // @namespace    https://github.com/netcaty
-// @version      0.8.3
-// @description  One-click archive of the current page (logged-in content included) as a self-contained single-file HTML, with optional upload to archive.org for permanent storage.
-// @description:zh-CN 一键归档当前页面（包括已登录的页面），打包成自包含单文件 HTML，并可一键上传 archive.org 永久保存。
-// @description:en One-click archive of the current page (logged-in content included) as a self-contained single-file HTML, with optional upload to archive.org for permanent storage.
+// @version      0.8.4
+// @description  One-click archive of the current page (logged-in content included) as a self-contained single-file HTML, with optional upload to archive.org for permanent storage. Can redact personal info such as nicknames and avatars before archiving.
+// @description:zh-CN 一键归档当前页面（包括已登录的页面），打包成自包含单文件 HTML，并可一键上传 archive.org 永久保存。支持在归档前标注并打码昵称、头像等个人信息。
+// @description:en One-click archive of the current page (logged-in content included) as a self-contained single-file HTML, with optional upload to archive.org for permanent storage. Can redact personal info such as nicknames and avatars before archiving.
 // @author       netcat
 // @license      MIT
 // @homepageURL  https://github.com/netcaty/dotfiles
@@ -51,6 +51,8 @@
   const GM_KEY_DOWNLOAD_ONLY = 'download_only';
   const GM_KEY_KEEP_LOCAL = 'keep_local';
   const GM_KEY_SHOTS = 'enable_shots';
+  const GM_KEY_REDACT = 'redact_enabled';       // 隐私打码总开关（默认关，不改变原有行为）
+  const GM_KEY_REDACT_MAP = 'redact_selectors'; // { "<hostname>": ["<css selector>", ...] }
   const IA_COLLECTION = 'opensource'; // 个人上传公开集合
   const IA_MEDIATYPE_WEB = 'web';     // 纯 WARC：语义正确，但 IA 详情页就是 "No Preview Available"
   const IA_MEDIATYPE_IMAGE = 'image'; // 带截图：详情页走 BookReader 图片查看器，可翻页
@@ -116,6 +118,71 @@
       if (typeof GM_setValue === 'function') { GM_setValue(GM_KEY_SHOTS, Boolean(v)); return true; }
     } catch { /* ignore */ }
     return false;
+  }
+
+  // ============================================================
+  //  隐私打码：把页面上指定的区域（昵称 / 头像 / 用户信息条…）在归档前抹掉
+  //  ------------------------------------------------------------
+  //  两个刻意的设计取舍：
+  //  ① 打码做在**克隆出来的文档**上，所以 WARC（保真件）和整页截图（由这份 HTML
+  //     重绘）两条出口同时生效 —— 只对截图做马赛克是白打，回放里照样能复制文本。
+  //  ② 匹配方式是"整块替换成同尺寸纯色块"，不是插入模糊层：模糊层下文本仍在 DOM 里，
+  //     仍然可以被选中复制；直接换掉元素则连 src / href 等属性一起消失，
+  //     不会留下能从 URL 反查用户身份的痕迹。
+  // ============================================================
+  function getRedactEnabled() {
+    try {
+      if (typeof GM_getValue === 'function') {
+        return GM_getValue(GM_KEY_REDACT, false) === true;
+      }
+    } catch { /* ignore */ }
+    return false;
+  }
+  function setRedactEnabled(v) {
+    try {
+      if (typeof GM_setValue === 'function') { GM_setValue(GM_KEY_REDACT, Boolean(v)); return true; }
+    } catch { /* ignore */ }
+    return false;
+  }
+  // 打码规则按域名存：同一站点配一次就长期有效。file:// 等无 hostname 的场景归到 (local)。
+  function redactHost() {
+    let h = '';
+    try { h = location.hostname || ''; } catch { /* ignore */ }
+    return (h || '(local)').toLowerCase();
+  }
+  function getRedactMap() {
+    try {
+      if (typeof GM_getValue === 'function') {
+        const v = GM_getValue(GM_KEY_REDACT_MAP, {});
+        if (v && typeof v === 'object' && !Array.isArray(v)) return v;
+      }
+    } catch { /* ignore */ }
+    return {};
+  }
+  function setRedactMap(m) {
+    try {
+      if (typeof GM_setValue === 'function') { GM_setValue(GM_KEY_REDACT_MAP, m || {}); return true; }
+    } catch { /* ignore */ }
+    return false;
+  }
+  function getRedactList(host) {
+    const l = getRedactMap()[host || redactHost()];
+    return Array.isArray(l) ? l.filter((s) => typeof s === 'string' && s) : [];
+  }
+  function addRedactSelector(sel, host) {
+    host = host || redactHost();
+    const m = getRedactMap();
+    const l = Array.isArray(m[host]) ? m[host].slice() : [];
+    if (!l.includes(sel)) l.push(sel);
+    m[host] = l;
+    return setRedactMap(m) ? l : null;
+  }
+  function removeRedactSelector(sel, host) {
+    host = host || redactHost();
+    const m = getRedactMap();
+    const l = (Array.isArray(m[host]) ? m[host] : []).filter((s) => s !== sel);
+    if (l.length) m[host] = l; else delete m[host];
+    return setRedactMap(m) ? l : null;
   }
 
   // 最近一次存档结果（持久化，便于在设置面板里回看，不用翻控制台）
@@ -933,6 +1000,43 @@
   }
 
   // ---------- 主流程 ----------
+  // 把已标注的打码区域从克隆里整块换成同尺寸纯色占位块，返回处理数量。
+  // 尺寸取自 live 元素（克隆尚未参与布局，量不到），元素顺序在深拷贝里保持一致，
+  // 所以两侧 querySelectorAll 的结果按下标一一对应。
+  function applyRedactions(clone) {
+    const list = getRedactList();
+    if (!list.length) return 0;
+    const isOurs = (el) => !!(el.closest && el.closest('[data-sps-ui]'));
+    let n = 0;
+    for (const sel of list) {
+      let liveHits, cloneHits;
+      try {
+        liveHits = Array.from(document.querySelectorAll(sel)).filter((el) => !isOurs(el));
+        cloneHits = Array.from(clone.querySelectorAll(sel)).filter((el) => !isOurs(el));
+      } catch (e) { log('打码选择器无效，已跳过：', sel, e.message); continue; }
+      const m = Math.min(liveHits.length, cloneHits.length);
+      if (!m) { log('打码选择器没有命中：', sel); continue; }
+      for (let i = 0; i < m; i++) {
+        const live = liveHits[i];
+        const node = cloneHits[i];
+        let w = 0, h = 0, disp = 'block';
+        try {
+          const r = live.getBoundingClientRect();
+          w = Math.round(r.width); h = Math.round(r.height);
+          const d = getComputedStyle(live).display;
+          if (d === 'inline' || d === 'inline-flex') disp = 'inline-block';
+        } catch { /* ignore */ }
+        const ph = clone.ownerDocument.createElement('div');
+        ph.setAttribute('data-sps-redacted', '1');
+        ph.style.cssText = `display:${disp};width:${Math.max(1, w)}px;height:${Math.max(1, h)}px;`
+          + 'background:#1f2329;border-radius:4px;';
+        node.replaceWith(ph);
+        n++;
+      }
+    }
+    return n;
+  }
+
   async function buildSnapshot() {
     log('开始构建快照，当前页:', location.href);
     const started = Date.now();
@@ -947,6 +1051,14 @@
     const clone = document.documentElement.cloneNode(true);
     const wrap = document.implementation.createHTMLDocument('snapshot');
     wrap.documentElement.replaceWith(clone);
+
+    // 1.5) 隐私打码。必须排在收集图片**之前**：这样被标注的头像连 data URI 都不会生成，
+    //      也不会把请求记进 inlineFailures。WARC 与截图共用这一份 HTML。
+    let redacted = 0;
+    if (getRedactEnabled()) {
+      redacted = applyRedactions(clone);
+      log(redacted ? `隐私打码：已抹除 ${redacted} 处` : '隐私打码：已开启，但本页没有命中任何标注区域');
+    }
 
     // 收集需要处理的元素
     const imgs = Array.from(clone.querySelectorAll('img'));
@@ -1078,7 +1190,7 @@ ${cloneHtml}
 
     const done = Date.now();
     log(`快照构建完成，耗时 ${((done - started) / 1000).toFixed(1)}s，大小 ${(new Blob([html]).size / 1024 / 1024).toFixed(2)} MB`);
-    return { html, filename: `${safeTitle()}_${timestamp()}.html` };
+    return { html, filename: `${safeTitle()}_${timestamp()}.html`, redacted };
   }
 
   function downloadSnapshot(html, filename) {
@@ -1103,8 +1215,128 @@ ${cloneHtml}
     }
   }
 
+  // ---------- 打码区域点选器 ----------
+  // 页面结构千变万化，脚本没能力判断哪个 div 是「当前登录用户」。所以让用户点一次，
+  // 由脚本把该元素换算成 CSS 选择器按域名存下来，之后每次归档自动套用。
+  function cssPath(el) {
+    if (!el || el.nodeType !== 1 || !el.tagName) return '';
+    const esc = (s) => (window.CSS && CSS.escape)
+      ? CSS.escape(String(s))
+      : String(s).replace(/[^\w-]/g, '\\$&');
+    const identOk = (s) => /^[A-Za-z][\w-]*$/.test(s);
+    const isUnique = (s) => { try { return document.querySelectorAll(s).length === 1; } catch { return false; } };
+
+    if (el.id && identOk(el.id)) {
+      const s = '#' + esc(el.id);
+      if (isUnique(s)) return s;
+    }
+    const parts = [];
+    let node = el;
+    while (node && node.nodeType === 1 && node !== document.documentElement) {
+      if (node.id && identOk(node.id)) {
+        const s = '#' + esc(node.id);
+        if (isUnique(s)) { parts.unshift(s); break; }
+      }
+      let seg = node.tagName.toLowerCase();
+      const cls = Array.from(node.classList || []).filter(identOk).slice(0, 2);
+      if (cls.length) seg += '.' + cls.map(esc).join('.');
+      const parent = node.parentElement;
+      if (parent) {
+        // 只用 :nth-of-type —— :nth-child 会被无关的兄弟节点带偏
+        const sameTag = Array.from(parent.children).filter((c) => c.tagName === node.tagName);
+        if (sameTag.length > 1) seg += ':nth-of-type(' + (sameTag.indexOf(node) + 1) + ')';
+      }
+      parts.unshift(seg);
+      const test = parts.join(' > ');
+      if (isUnique(test)) return test;
+      node = node.parentElement;
+    }
+    return parts.join(' > ');
+  }
+
+  // onPick(element, selector) / onCancel()
+  function startRedactPicker(onPick, onCancel) {
+    if (document.getElementById('sps-pick-hint')) return;
+
+    const hint = document.createElement('div');
+    hint.id = 'sps-pick-hint';
+    hint.setAttribute('data-sps-ui', '1');
+    hint.textContent = '点击要打码的区域（Esc 取消）';
+    hint.style.cssText = `
+      position: fixed; z-index: 2147483647; left: 50%; top: 16px; transform: translateX(-50%);
+      background: #1f2329; color: #fff; font: 600 13px/1 system-ui, sans-serif;
+      padding: 11px 18px; border-radius: 22px; box-shadow: 0 8px 28px rgba(0,0,0,.4);
+      pointer-events: none; white-space: nowrap;
+    `;
+
+    const box = document.createElement('div');
+    box.id = 'sps-pick-box';
+    box.setAttribute('data-sps-ui', '1');
+    box.style.cssText = `
+      position: fixed; z-index: 2147483646; display: none; pointer-events: none;
+      border: 2px solid #d93025; background: rgba(217,48,37,.14); border-radius: 3px;
+    `;
+
+    const root = document.body || document.documentElement;
+    root.appendChild(hint);
+    root.appendChild(box);
+
+    const isOurs = (el) => !!(el && el.closest && el.closest('[data-sps-ui]'));
+
+    function onMove(e) {
+      const t = e.target;
+      if (!t || isOurs(t)) { box.style.display = 'none'; return; }
+      const r = t.getBoundingClientRect();
+      box.style.display = 'block';
+      box.style.left = r.left + 'px';
+      box.style.top = r.top + 'px';
+      box.style.width = r.width + 'px';
+      box.style.height = r.height + 'px';
+    }
+    // 把点击彻底截留在捕获阶段：页面自身的链接跳转 / 折叠展开都不会被触发
+    function swallow(e) { e.preventDefault(); e.stopPropagation(); }
+    function onClick(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      const t = e.target;
+      if (!t || isOurs(t)) return;
+      const sel = cssPath(t);
+      cleanup();
+      if (sel) onPick(t, sel); else onCancel && onCancel('无法为该元素生成选择器');
+    }
+    function onKey(e) {
+      if (e.key !== 'Escape') return;
+      swallow(e);
+      cleanup();
+      onCancel && onCancel();
+    }
+    function cleanup() {
+      document.removeEventListener('mousemove', onMove, true);
+      document.removeEventListener('pointerdown', swallow, true);
+      document.removeEventListener('mousedown', swallow, true);
+      document.removeEventListener('mouseup', swallow, true);
+      document.removeEventListener('click', onClick, true);
+      document.removeEventListener('dblclick', swallow, true);
+      document.removeEventListener('contextmenu', swallow, true);
+      document.removeEventListener('keydown', onKey, true);
+      hint.remove();
+      box.remove();
+      document.documentElement.style.cursor = '';
+    }
+
+    document.addEventListener('mousemove', onMove, true);
+    document.addEventListener('pointerdown', swallow, true);
+    document.addEventListener('mousedown', swallow, true);
+    document.addEventListener('mouseup', swallow, true);
+    document.addEventListener('click', onClick, true);
+    document.addEventListener('dblclick', swallow, true);
+    document.addEventListener('contextmenu', swallow, true);
+    document.addEventListener('keydown', onKey, true);
+    document.documentElement.style.cursor = 'crosshair';
+  }
+
   // ---------- 设置面板（随悬浮按钮展开，填写 archive.org S3 key） ----------
-  // 返回 { el, focus }，由悬浮按钮容器控制显示/隐藏；不做遮罩、不拦截页面点击。
+  // 返回 { el }，由悬浮按钮容器控制显示/隐藏；不做遮罩、不拦截页面点击。
   function buildSettingsPanel() {
     const el = document.createElement('div');
     el.id = 'sps-settings';
@@ -1123,11 +1355,12 @@ ${cloneHtml}
     const dlOnly = getDownloadOnly();
     const keepLocal = getKeepLocal();
     const shotsOn = getShots();
+    const redactOn = getRedactEnabled();
 
     el.innerHTML = `
       <style>
         .hd { padding: 12px 16px; font-weight: 700; font-size: 14px; border-bottom: 1px solid #eceef1; }
-        .bd { padding: 14px 16px; }
+        .bd { padding: 14px 16px; max-height: min(66vh, 560px); overflow-y: auto; }
         .row { margin-bottom: 12px; }
         label { display: block; font-size: 12px; color: #646a73; margin-bottom: 6px; }
         input[type=text], input[type=password] {
@@ -1147,6 +1380,13 @@ ${cloneHtml}
         .toggle input:checked + .slider::after { transform: translateX(18px); }
         .hint { font-size: 11px; color: #8a9099; margin-top: 8px; line-height: 1.6; }
         .hint a { color: #2d6cdf; }
+        .rlist { font: 11px/1.5 ui-monospace, Menlo, Consolas, monospace; color: #646a73; }
+        .ritem { display: flex; align-items: center; gap: 6px; background: #f6f7f9;
+          border-radius: 6px; padding: 5px 6px 5px 8px; margin-bottom: 4px; }
+        .ritem code { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .ritem .del { background: transparent; color: #d4380d; padding: 2px 4px; font-weight: 700; font-size: 12px; }
+        .empty { color: #8a9099; font-size: 11px; padding: 0 0 6px; }
+        .pick { background: #eef3fd; color: #2d6cdf; width: 100%; margin-top: 2px; }
         .ft { padding: 10px 16px; border-top: 1px solid #eceef1; display: flex; align-items: center; gap: 8px; }
         .status { font-size: 11px; color: #8a9099; flex: 1; }
         button { border: 0; border-radius: 8px; padding: 8px 14px; font-size: 12px; font-weight: 600; cursor: pointer; }
@@ -1193,6 +1433,21 @@ ${cloneHtml}
             <span class="slider"></span>
           </span>
         </div>
+        <div class="sw">
+          <div>
+            <div class="txt">归档时打码隐私信息</div>
+            <div class="sub">仅对下方已标注的区域生效，WARC 与截图同时打码</div>
+          </div>
+          <span class="toggle">
+            <input id="redact" type="checkbox" ${redactOn ? 'checked' : ''}>
+            <span class="slider"></span>
+          </span>
+        </div>
+        <div class="row" style="margin-top:10px;">
+          <label>本域名的打码区域（<span id="redacthost"></span>）</label>
+          <div class="rlist" id="redactlist"></div>
+          <button class="pick" id="pick" type="button">+ 在页面上点选打码区域</button>
+        </div>
         <div class="hint">
           Key 到 <a href="https://archive.org/account/s3.php" target="_blank" rel="noreferrer">archive.org/account/s3.php</a> 免费申请。
           保存在 Tampermonkey 本地存储，更新脚本不会丢失。
@@ -1233,6 +1488,75 @@ ${cloneHtml}
         box.appendChild(a);
       }
     })();
+
+    // 打码区域列表：按当前域名展示，可逐条删除
+    function refreshRedact() {
+      const host = redactHost();
+      $('redacthost').textContent = host;
+      const box = $('redactlist');
+      box.textContent = '';
+      const list = getRedactList(host);
+      if (!list.length) {
+        const e = document.createElement('div');
+        e.className = 'empty';
+        e.textContent = '暂无。点下方按钮，回到页面上点要打码的元素。';
+        box.appendChild(e);
+        return;
+      }
+      list.forEach((sel) => {
+        const row = document.createElement('div');
+        row.className = 'ritem';
+        const code = document.createElement('code');
+        code.textContent = sel;
+        code.title = sel;
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.className = 'del';
+        del.textContent = '✕';
+        del.title = '删除该打码区域';
+        del.onclick = () => {
+          removeRedactSelector(sel, host);
+          refreshRedact();
+          $('status').textContent = '✓ 已删除一条打码区域';
+        };
+        row.appendChild(code);
+        row.appendChild(del);
+        box.appendChild(row);
+      });
+    }
+    refreshRedact();
+
+    // 「打码」总开关：切换即保存
+    $('redact').addEventListener('change', () => {
+      const on = $('redact').checked;
+      const okFlag = setRedactEnabled(on);
+      $('status').textContent = okFlag
+        ? (on ? '✓ 归档时会对已标注区域打码' : '✓ 已关闭打码，归档会保留原样')
+        : '保存失败：GM_setValue 不可用';
+    });
+
+    // 点选打码区域：隐藏面板 → 进入点选模式 → 存选择器
+    $('pick').onclick = () => {
+      el.style.display = 'none'; // 面板浮在页面上会挡住目标元素
+      startRedactPicker((element, sel) => {
+        const list = addRedactSelector(sel);
+        if (!list) {
+          showResultToast('err', '保存打码区域失败', ['GM_setValue 不可用，规则没能存下来。'], null, 0);
+          return;
+        }
+        // 点了就说明想用 —— 顺手把总开关打开，省得再回面板点一次
+        const autoOn = !getRedactEnabled() && setRedactEnabled(true);
+        refreshRedact();
+        $('redact').checked = true;
+        $('status').textContent = '✓ 已添加打码区域';
+        showResultToast('ok', '已添加打码区域', [
+          sel,
+          '之后每次归档都会自动打码（含 WARC 与截图）。' + (autoOn ? '已同时打开「归档时打码隐私信息」。' : ''),
+        ], null, 9000);
+      }, (msg) => {
+        if (msg) showResultToast('info', '已取消打码标注', [msg], null, 6000);
+      });
+    };
 
     // 「仅下载」开关：切换即保存，无需点「保存」按钮（避免忘记保存导致不生效）
     $('dlonly').addEventListener('change', () => {
@@ -1277,7 +1601,8 @@ ${cloneHtml}
       const okFlag = setDownloadOnly(only);
       const okKeep = setKeepLocal($('keeplocal').checked);
       const okShots = setShots($('shots').checked);
-      if (!okKey || !okFlag || !okKeep || !okShots) { $('status').textContent = '保存失败：GM_setValue 不可用'; return; }
+      const okRedact = setRedactEnabled($('redact').checked);
+      if (!okKey || !okFlag || !okKeep || !okShots || !okRedact) { $('status').textContent = '保存失败：GM_setValue 不可用'; return; }
       let msg;
       if (only) msg = '✓ 已保存（仅下载到本地）';
       else if (a && s) msg = '✓ 已保存，存档时将上传 archive.org';
@@ -1438,9 +1763,9 @@ ${cloneHtml}
 
   // ---------- 核心保存动作：构建 → 上传 archive.org（失败降级为本地下载） ----------
   async function doSave() {
-    let html, filename;
+    let html, filename, redacted = 0;
     try {
-      ({ html, filename } = await buildSnapshot());
+      ({ html, filename, redacted } = await buildSnapshot());
     } catch (e) {
       log('构建失败', e);
       alert(`[${TOOL_NAME}] 构建快照失败：` + e.message);
@@ -1451,14 +1776,19 @@ ${cloneHtml}
     const inlineWarn = () => (inlineFailures.length
       ? [`⚠ ${inlineFailures.length} 个资源没能内联（图床不给 CORS / 需登录），快照里留的是外链：本地打开正常，但 WARC 回放时会显示成坏图。`]
       : []);
+    // 打码结果提示：开启但零命中往往是站点改版导致选择器失效，必须说出来，不能静默
+    const redactNote = () => (redacted
+      ? [`已按标注打码 ${redacted} 处隐私区域。`]
+      : (getRedactEnabled() ? ['⚠ 已开启打码，但本页没有命中任何标注区域（站点改版后选择器可能已失效，可重新标注）。'] : []));
 
     // ① 仅下载模式（默认）—— 直接本地下载，不上传
     if (getDownloadOnly()) {
       log('当前模式：仅下载（不触发上传）');
-      setLastResult('仅下载（未上传）' + (inlineFailures.length ? `，${inlineFailures.length} 个资源未内联` : ''));
+      setLastResult('仅下载（未上传）' + (redacted ? `，打码 ${redacted} 处` : '')
+        + (inlineFailures.length ? `，${inlineFailures.length} 个资源未内联` : ''));
       downloadSnapshot(html, filename);
       showResultToast('info', '快照已保存到下载目录',
-        ['当前为「仅下载」模式，未上传 archive.org。'].concat(inlineWarn()), null, 12000);
+        ['当前为「仅下载」模式，未上传 archive.org。'].concat(redactNote(), inlineWarn()), null, 12000);
       return;
     }
 
@@ -1537,6 +1867,7 @@ ${cloneHtml}
       const keep = getKeepLocal();
       const lines = ['item：' + up.url];
       if (up.note) lines.push(up.note);
+      lines.push(...redactNote());
       lines.push(...inlineWarn());
       if (shots.length) {
         lines.push(shotOk === shots.length
@@ -1550,7 +1881,8 @@ ${cloneHtml}
 
       setLastResult(
         '成功' + (up.verified ? '（响应码异常，已由 metadata 复验确认）' : '') +
-          (shots.length ? `，截图 ${shotOk}/${shots.length}` : '') + '：' + up.url
+          (shots.length ? `，截图 ${shotOk}/${shots.length}` : '') +
+          (redacted ? `，打码 ${redacted} 处` : '') + '：' + up.url
       );
 
       const links = [];
@@ -1568,7 +1900,7 @@ ${cloneHtml}
     showResultToast('err', '上传 archive.org 失败', [
       up.error || '未知错误',
       '已改为下载本地快照，数据不会丢。',
-    ], null, 0);
+    ].concat(redactNote()), null, 0);
     downloadSnapshot(html, filename);
   }
 
