@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         v2ex屏蔽器
 // @namespace    https://github.com/netcaty
-// @version      2.19
-// @description  按关键词屏蔽 V2EX 帖子，支持隐藏/折叠/模糊、开关即时生效、Base64 自动解码、回复框预览与图片粘贴上传
+// @version      2.20
+// @description  按关键词屏蔽 V2EX 帖子，支持隐藏/折叠/模糊、开关即时生效、Base64 自动解码、回复框预览与图片上传（粘贴 / 相册选图）
 // @author       netcaty
 // @license      MIT
 // @homepageURL  https://github.com/netcaty/dotfiles
@@ -34,9 +34,18 @@
     };
 
     // 当前版本号（显示在设置面板标题旁，便于确认更新是否生效）
-    // 直接读脚本元数据，改 @version 时不必再同步这里
-    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info &&
-                            GM_info.script && GM_info.script.version) || '0.0.0';
+    // 优先读宿主提供的脚本元数据；iOS Userscripts / Greasemonkey 4 这类宿主没有 GM_info
+    // （或只提供 GM.info），读不到就回落到下面的常量——改 @version 时同步改这里
+    const FALLBACK_VERSION = '2.20';
+    const SCRIPT_VERSION = (() => {
+        let info = null;
+        try {
+            info = (typeof GM_info !== 'undefined' && GM_info) ||
+                   (typeof GM !== 'undefined' && GM && GM.info) || null;
+        } catch (e) {}
+        const v = info && info.script && info.script.version;
+        return (typeof v === 'string' && v.trim()) ? v.trim() : FALLBACK_VERSION;
+    })();
 
     // 存储兼容层：Userscripts（iOS Safari）只提供异步的 GM.getValue/GM.setValue，
     // 不支持同步 GM_getValue/GM_setValue，该环境下回落到 localStorage
@@ -663,6 +672,7 @@
                 .rp-tab { cursor:pointer; margin-right:15px; padding-bottom:2px; display:inline-block;
                           border-bottom:2px solid transparent; color:#778087; user-select:none; }
                 .rp-tab.rp-active { border-bottom-color:#333; color:#333; font-weight:500; }
+                .rp-tab.rp-upload { color:#4CAF50; margin-left:4px; }
             `;
             document.head.appendChild(style);
         }
@@ -673,6 +683,7 @@
         tabBar.innerHTML = `
             <span class="rp-tab rp-active" data-tab="edit">编辑</span>
             <span class="rp-tab" data-tab="preview">预览</span>
+            <span class="rp-tab rp-upload" id="rp-upload-btn" title="插入图片：粘贴，或点这里从相册选图">图片</span>
             <span id="rp-upload-status" style="float:right;font-size:12px;color:#99a0a6;"></span>
         `;
 
@@ -702,7 +713,8 @@
         };
 
         tabBar.addEventListener('click', e => {
-            const tab = e.target.closest('.rp-tab');
+            // 只认带 data-tab 的标签；"图片"按钮同用 rp-tab 的样式但不能切模式
+            const tab = e.target.closest('.rp-tab[data-tab]');
             if (tab) setTab(tab.dataset.tab);
         });
 
@@ -752,7 +764,58 @@
         };
 
         let uploadSeq = 0;
-        const handleImageUpload = blob => {
+
+        // 从剪贴板 / DataTransfer 里取图片文件。
+        // 各宿主差异很大：桌面 Chrome 给 items，iOS Safari 常常只给 files，两种都兜住。
+        function pickImageFiles(dt) {
+            const out = [];
+            if (!dt) return out;
+            const push = f => {
+                if (f && (!f.type || f.type.indexOf('image/') === 0)) out.push(f);
+            };
+            if (dt.files && dt.files.length) {
+                for (let i = 0; i < dt.files.length; i++) push(dt.files[i]);
+            } else if (dt.items && dt.items.length) {
+                for (let i = 0; i < dt.items.length; i++) {
+                    const it = dt.items[i];
+                    if (it.kind === 'file' && typeof it.getAsFile === 'function') push(it.getAsFile());
+                }
+            }
+            return out;
+        }
+
+        // iOS 从相册选图常给 HEIC/HEIF，Imgur 不接受；Safari 能解码，用 canvas 转 JPEG
+        function normalizeImage(file) {
+            const name = file.name || '';
+            const isHeic = /^image\/hei[cf]$/i.test(file.type || '') || /\.hei[cf]$/i.test(name);
+            if (!isHeic) return Promise.resolve(file);
+            return new Promise(resolve => {
+                let settled = false;
+                const finish = f => { if (!settled) { settled = true; resolve(f || file); } };
+                const timer = setTimeout(() => finish(file), 8000);
+                try {
+                    const url = URL.createObjectURL(file);
+                    const img = new Image();
+                    img.onload = () => {
+                        clearTimeout(timer);
+                        try {
+                            const canvas = document.createElement('canvas');
+                            canvas.width = img.naturalWidth || img.width;
+                            canvas.height = img.naturalHeight || img.height;
+                            canvas.getContext('2d').drawImage(img, 0, 0);
+                            canvas.toBlob(b => {
+                                URL.revokeObjectURL(url);
+                                finish(b && b.size ? b : file);
+                            }, 'image/jpeg', 0.9);
+                        } catch (e) { URL.revokeObjectURL(url); finish(file); }
+                    };
+                    img.onerror = () => { clearTimeout(timer); URL.revokeObjectURL(url); finish(file); };
+                    img.src = url;
+                } catch (e) { finish(file); }
+            });
+        }
+
+        const handleImageUpload = file => {
             const clientId = pickImgurClientId();
             // 光标处插入占位符，成功后替换为图片链接，失败则回收
             const ph = `[图片上传中…#${++uploadSeq}]`;
@@ -762,12 +825,15 @@
             textarea.selectionStart = textarea.selectionEnd = start + ph.length;
             textarea.dispatchEvent(new Event('input'));
             setUploadStatus('上传中…');
-            const fd = new FormData();
-            fd.append('image', blob, 'clipboard.png');
-            fetch('https://api.imgur.com/3/image', {
-                method: 'POST',
-                headers: { Authorization: 'Client-ID ' + clientId },
-                body: fd
+            normalizeImage(file).then(blob => {
+                const fd = new FormData();
+                const ext = /png/i.test(blob.type || '') ? 'png' : 'jpg';
+                fd.append('image', blob, 'upload.' + ext);
+                return fetch('https://api.imgur.com/3/image', {
+                    method: 'POST',
+                    headers: { Authorization: 'Client-ID ' + clientId },
+                    body: fd
+                });
             }).then(res => res.json().then(json => {
                 if (!res.ok || !json.success) {
                     // v3 标准错误为 { data: { error } }，imgur 网关限流错误为 { errors: [...] }
@@ -793,32 +859,74 @@
             });
         };
 
-        // 粘贴剪贴板图片 → 自动上传；纯文本粘贴不受任何影响
-        textarea.addEventListener('paste', e => {
-            const items = e.clipboardData && e.clipboardData.items;
-            if (!items) return;
-            let imageItem = null;
-            for (let i = 0; i < items.length; i++) {
-                if (items[i].type && items[i].type.indexOf('image/') === 0) { imageItem = items[i]; break; }
-            }
-            if (!imageItem) return;
+        // 粘贴：textarea 与 document（捕获阶段）各挂一层。
+        // iOS Safari 对 textarea 的图片粘贴支持不完整（有时只在 document 上派发，
+        // 更多时候根本不往 textarea 里塞图片），所以再给一个显式的图片按钮兜底。
+        // 防重复：① 同一事件在 document 捕获 + textarea 冒泡会被处理两次；
+        //        ② iOS 上 beforeinput 与 paste 可能先后都触发。两道闸门各管一种。
+        let handledPasteEvent = null;
+        let lastImageInsertAt = 0;
+        const isDupInsert = () => {
+            const now = Date.now();
+            if (now - lastImageInsertAt < 800) return true;
+            lastImageInsertAt = now;
+            return false;
+        };
+
+        const onPaste = e => {
+            if (handledPasteEvent === e) return;
+            if (e.target !== textarea && document.activeElement !== textarea) return;
+            const files = pickImageFiles(e.clipboardData);
+            if (!files.length) return;   // 纯文本粘贴不受任何影响
+            if (isDupInsert()) return;
+            handledPasteEvent = e;
             e.preventDefault();
-            const blob = imageItem.getAsFile();
-            if (blob) handleImageUpload(blob);
+            files.forEach(handleImageUpload);
+        };
+        textarea.addEventListener('paste', onPaste);
+        document.addEventListener('paste', onPaste, true);
+
+        // iOS 16.4+ 的 beforeinput 也会捎带 dataTransfer.files，作为粘贴的补充路径
+        textarea.addEventListener('beforeinput', e => {
+            if (e.inputType !== 'insertFromPaste') return;
+            const files = pickImageFiles(e.dataTransfer);
+            if (!files.length) return;
+            if (isDupInsert()) return;
+            e.preventDefault();
+            files.forEach(handleImageUpload);
         });
+
+        // 相册选图 / 拍照：点"图片"按钮唤起系统选择器（移动端唯一可靠的入口）
+        const oldInput = document.getElementById('rp-file-input');
+        if (oldInput) oldInput.remove();
+        const fileInput = document.createElement('input');
+        fileInput.type = 'file';
+        fileInput.id = 'rp-file-input';
+        fileInput.accept = 'image/*';
+        fileInput.multiple = true;
+        fileInput.style.display = 'none';
+        fileInput.addEventListener('change', () => {
+            const files = Array.prototype.slice.call(fileInput.files || []);
+            fileInput.value = '';   // 清空才能重复选同一张
+            files.forEach(handleImageUpload);
+        });
+        document.body.appendChild(fileInput);
+
+        const uploadBtn = tabBar.querySelector('#rp-upload-btn');
+        if (uploadBtn) {
+            uploadBtn.addEventListener('click', () => {
+                // 必须保留在用户手势里调用，否则 iOS Safari 不弹选择器
+                fileInput.click();
+            });
+        }
 
         // 拖放图片文件（桌面端）
         textarea.addEventListener('dragover', e => e.preventDefault());
         textarea.addEventListener('drop', e => {
-            const files = e.dataTransfer && e.dataTransfer.files;
-            if (!files || !files.length) return;
-            let file = null;
-            for (let i = 0; i < files.length; i++) {
-                if (files[i].type && files[i].type.indexOf('image/') === 0) { file = files[i]; break; }
-            }
-            if (!file) return;
+            const files = pickImageFiles(e.dataTransfer);
+            if (!files.length) return;
             e.preventDefault();
-            handleImageUpload(file);
+            files.forEach(handleImageUpload);
         });
 
         // 回复按钮旁的快捷键提示
