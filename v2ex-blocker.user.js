@@ -174,10 +174,14 @@
             </button>
 
             <div style="margin-top:10px;border-top:1px solid #eee;padding-top:10px;">
-                <label>Imgur Client-ID（回复框粘贴图片自动上传）：
-                    <input id="imgur-client-id" type="text" placeholder="免费注册 api.imgur.com 应用后填入"
+                <label>Imgur Client-ID（回复框粘贴 / 拖入图片自动上传）：
+                    <input id="imgur-client-id" type="text" placeholder="留空则用内置公共 ID；想用自己的请填"
                            style="width:100%;margin-top:5px;padding:5px;font-size:13px;box-sizing:border-box;">
                 </label>
+                <div style="margin-top:4px;font-size:12px;color:#888;line-height:1.4;">
+                    留空时使用脚本内置的公共 ID（共享匿名配额，可能随时被限流或失效），
+                    填入自己的 Client-ID 则优先使用。
+                </div>
             </div>
         `;
 
@@ -727,13 +731,29 @@
             }
         };
 
+        // 内置公共 Client-ID 池（参照 V2Next 的做法）：未填自己的 ID 时随机取一个，分散匿名配额
+        const IMGUR_CLIENT_ID_POOL = [
+            '3107b9ef8b316f3',
+            '442b04f26eefc8a',
+            '59cfebe717c09e4',
+            '60605aad4a62882',
+            '6c65ab1d3f5452a',
+            '83e123737849aa9',
+            '9311f6be1c10160',
+            'c4a4a563f698595',
+            '81be04b9e4a08ce'
+        ];
+
+        // 优先用设置面板里填的 ID；没填就从池里随机取一个
+        const pickImgurClientId = () => {
+            const own = (gmGet('imgurClientId', '') || '').trim();
+            if (own) return own;
+            return IMGUR_CLIENT_ID_POOL[Math.floor(Math.random() * IMGUR_CLIENT_ID_POOL.length)];
+        };
+
         let uploadSeq = 0;
         const handleImageUpload = blob => {
-            const clientId = (gmGet('imgurClientId', '') || '').trim();
-            if (!clientId) {
-                setUploadStatus('未配置 Imgur Client-ID，请在设置面板填写', true);
-                return;
-            }
+            const clientId = pickImgurClientId();
             // 光标处插入占位符，成功后替换为图片链接，失败则回收
             const ph = `[图片上传中…#${++uploadSeq}]`;
             const start = textarea.selectionStart ?? textarea.value.length;
