@@ -1,3 +1,6 @@
+# 工作区私有数据（memory 等），不入库
+.workbuddy/
+
 # CDP / 本地验证脚本，不入库
 test_*.cjs
 shot_*.cjs
