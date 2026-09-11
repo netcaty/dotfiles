@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         v2ex屏蔽器
 // @namespace    https://github.com/netcaty
-// @version      2.18
+// @version      2.19
 // @description  按关键词屏蔽 V2EX 帖子，支持隐藏/折叠/模糊、开关即时生效、Base64 自动解码、回复框预览与图片粘贴上传
 // @author       netcaty
 // @license      MIT
