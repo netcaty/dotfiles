@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         v2ex屏蔽器
 // @namespace    https://github.com/netcaty
-// @version      2.20
-// @description  按关键词屏蔽 V2EX 帖子，支持隐藏/折叠/模糊、开关即时生效、Base64 自动解码、回复框预览与图片上传（粘贴 / 相册选图）
+// @version      2.21
+// @description  按关键词屏蔽 V2EX 帖子，支持隐藏/折叠/模糊、开关即时生效、Base64 自动解码、回复框与发帖框预览、图片上传（粘贴 / 相册选图）
 // @author       netcaty
 // @license      MIT
 // @homepageURL  https://github.com/netcaty/dotfiles
@@ -36,7 +36,7 @@
     // 当前版本号（显示在设置面板标题旁，便于确认更新是否生效）
     // 优先读宿主提供的脚本元数据；iOS Userscripts / Greasemonkey 4 这类宿主没有 GM_info
     // （或只提供 GM.info），读不到就回落到下面的常量——改 @version 时同步改这里
-    const FALLBACK_VERSION = '2.20';
+    const FALLBACK_VERSION = '2.21';
     const SCRIPT_VERSION = (() => {
         let info = null;
         try {
@@ -183,7 +183,7 @@
             </button>
 
             <div style="margin-top:10px;border-top:1px solid #eee;padding-top:10px;">
-                <label>Imgur Client-ID（回复框粘贴 / 拖入图片自动上传）：
+                <label>Imgur Client-ID（回复框 / 发帖框粘贴或拖入图片自动上传）：
                     <input id="imgur-client-id" type="text" placeholder="留空则用内置公共 ID；想用自己的请填"
                            style="width:100%;margin-top:5px;padding:5px;font-size:13px;box-sizing:border-box;">
                 </label>
@@ -573,7 +573,7 @@
     // 统一处理 DOM 变化（关键词屏蔽 + base64 解码）
     function onDomChange(mutations) {
         if (config.enabled) initBlocker();
-        ensureReplyPreview();
+        ensureAllEditorPreviews();
         if (!config.decodeBase64) return;
 
         mutations.forEach((mutation) => {
@@ -656,12 +656,61 @@
         return outLines.join('').replace(/(?:<br>)?\x00(\d+)\x00(?:<br>)?/g, (m, i) => store[+i]);
     }
 
+    // 空内容预览：renderPreview('') 会返回 '<br>'（真值），直接 || 兜底不生效，这里统一判空
+    const EMPTY_PREVIEW_HINT = '<span style="color:#ccc;">暂无内容，回到"编辑"输入后这里会实时渲染预览。</span>';
+    function renderPreviewInto(raw) {
+        const text = raw == null ? '' : String(raw);
+        if (!text.trim()) return EMPTY_PREVIEW_HINT;
+        return renderPreview(text) || EMPTY_PREVIEW_HINT;
+    }
+
     // V2EX 真实回复框的 id 是 reply_content（下划线）；兼容 reply-content 以防官方改回
     const getReplyTextarea = () => document.getElementById('reply_content') ||
                                    document.getElementById('reply-content');
 
-    function initReplyPreview() {
-        const textarea = getReplyTextarea();
+    // 创建主题页（/write）、节点发帖（/new/xxx）、编辑主题（/t/xxx/edit）的正文框。
+    // 必须带路径门：主题页上若有「回复框停靠」类脚本克隆出的 textarea，
+    // 兜底的 textarea[name="content"] 会误命中，导致给回复框套两遍 UI。
+    // ⚠️ 不能用 #topic_content——那是同名的 <input type="hidden"> 提交字段，不是编辑框；
+    // 真正的正文 textarea 是 #editor（被 CodeMirror 接管后自身 display:none）。
+    const TOPIC_PATH_RE = /^\/(?:write|new\/[^/]+|t\/\d+\/edit)(?:[/?#]|$)/;
+    const getTopicTextarea = () => {
+        if (!TOPIC_PATH_RE.test(location.pathname)) return null;
+        // 三级兜底：官方 id → 表单字段名 → 表单内第一个非回复框的 textarea
+        return document.getElementById('editor') ||
+               document.querySelector('form textarea[name="content"]') ||
+               Array.from(document.querySelectorAll('form textarea'))
+                    .find(t => t.id !== 'reply_content' && t.id !== 'reply-content') || null;
+    };
+
+    // 页面全局：声明了 @grant 时脚本跑在沙箱里，window 与页面隔离，得走 unsafeWindow；
+    // 无 @grant 的环境（Greasemonkey 4 / 部分移动端宿主）window 本身就是页面的
+    const pageWin = (() => {
+        try { return (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window; }
+        catch (e) { return window; }
+    })();
+
+    // 两个编辑器共用同一套上传实现；差异在 UI：
+    // - reply：回复框没有原生预览，需要完整的「编辑/预览/图片」三 tab
+    // - topic：/write 原生已有「正文/预览」tab 栏（.tab-alt-container），
+    //   只把「图片」入口并排挂进去，不再造一套编辑/预览
+    const editorScopes = [
+        { key: 'reply', tabBarId: 'rp-tab-bar', previewId: 'reply-preview',
+          find: getReplyTextarea, hint: '快速回复', tabs: true },
+        { key: 'topic', tabBarId: 'rp-tab-bar-topic', previewId: 'topic-preview',
+          find: getTopicTextarea, hint: '快速发布', tabs: false,
+          // 挂载点：原生 tab 栏容器；找不到就回落成挂在 textarea 前
+          mount: () => {
+              const previewTab = document.getElementById('tab-preview');
+              return previewTab ? previewTab.parentNode : null;
+          },
+          // 真正接收输入的容器（CodeMirror 生成），事件要挂在这而不是隐藏的 textarea
+          container: () => document.querySelector('.CodeMirror')
+        }
+    ];
+
+    function initEditorPreview(scope) {
+        const textarea = scope.find();
         if (!textarea || textarea.dataset.previewEnhanced === '1') return;
         textarea.dataset.previewEnhanced = '1';
 
@@ -672,58 +721,77 @@
                 .rp-tab { cursor:pointer; margin-right:15px; padding-bottom:2px; display:inline-block;
                           border-bottom:2px solid transparent; color:#778087; user-select:none; }
                 .rp-tab.rp-active { border-bottom-color:#333; color:#333; font-weight:500; }
-                .rp-tab.rp-upload { color:#4CAF50; margin-left:4px; }
+                .rp-upload { color:#4CAF50; margin-left:4px; }
             `;
             document.head.appendChild(style);
         }
 
+        // 挂载点：发帖页挂到原生「正文/预览」tab 栏里；回复框挂在 textarea 前
+        const mountPoint = scope.mount ? scope.mount() : null;
+        // 真正接收输入的容器：CodeMirror 页面上源 textarea 是 display:none 的，
+        // 粘贴/焦点落在 CM 生成的 .CodeMirror 上；其余情况就是 textarea 自己
+        const inputEl = (scope.container && scope.container()) || textarea;
+
         const tabBar = document.createElement('div');
-        tabBar.id = 'rp-tab-bar';
-        tabBar.style.cssText = 'margin:0 0 5px;font-size:14px;';
-        tabBar.innerHTML = `
-            <span class="rp-tab rp-active" data-tab="edit">编辑</span>
-            <span class="rp-tab" data-tab="preview">预览</span>
-            <span class="rp-tab rp-upload" id="rp-upload-btn" title="插入图片：粘贴，或点这里从相册选图">图片</span>
-            <span id="rp-upload-status" style="float:right;font-size:12px;color:#99a0a6;"></span>
-        `;
+        tabBar.id = scope.tabBarId;
+        if (mountPoint) {
+            // 直接复用原生的 .tab-alt 样式，视觉上就是原生 tab 栏的第三个标签
+            tabBar.style.cssText = 'display:flex;align-items:center;gap:8px;';
+            tabBar.innerHTML = `
+                <a class="tab-alt rp-upload rp-upload-btn" href="javascript:;" title="插入图片：粘贴，或点这里从相册选图">图片</a>
+                <span class="rp-upload-status" style="font-size:12px;color:#99a0a6;"></span>
+            `;
+            mountPoint.appendChild(tabBar);
+        } else {
+            tabBar.style.cssText = 'margin:0 0 5px;font-size:14px;';
+            tabBar.innerHTML = `
+                <span class="rp-tab rp-active" data-tab="edit">编辑</span>
+                <span class="rp-tab" data-tab="preview">预览</span>
+                <span class="rp-tab rp-upload rp-upload-btn" title="插入图片：粘贴，或点这里从相册选图">图片</span>
+                <span class="rp-upload-status" style="float:right;font-size:12px;color:#99a0a6;"></span>
+            `;
+            textarea.parentNode.insertBefore(tabBar, textarea);
+        }
 
-        const previewBox = document.createElement('div');
-        previewBox.id = 'reply-preview';
-        previewBox.style.cssText = 'display:none;min-height:110px;max-height:420px;overflow:auto;' +
-            'border:1px solid #e2e2e2;border-radius:3px;background:#fff;padding:12px;' +
-            'font-size:14px;line-height:1.6;word-break:break-word;';
-        const emptyHint = '<span style="color:#ccc;">暂无内容，回到"编辑"输入后这里会实时渲染预览。</span>';
-        previewBox.innerHTML = emptyHint;
+        let previewBox = null;
+        if (scope.tabs) {
+            previewBox = document.createElement('div');
+            previewBox.id = scope.previewId;
+            previewBox.style.cssText = 'display:none;min-height:110px;max-height:420px;overflow:auto;' +
+                'border:1px solid #e2e2e2;border-radius:3px;background:#fff;padding:12px;' +
+                'font-size:14px;line-height:1.6;word-break:break-word;';
+            previewBox.innerHTML = EMPTY_PREVIEW_HINT;
+            textarea.parentNode.insertBefore(previewBox, textarea.nextSibling);
+        }
 
-        textarea.parentNode.insertBefore(tabBar, textarea);
-        textarea.parentNode.insertBefore(previewBox, textarea.nextSibling);
+        if (scope.tabs) {
+            let mode = 'edit';
+            const setTab = next => {
+                mode = next;
+                const isPreview = next === 'preview';
+                textarea.style.display = isPreview ? 'none' : '';
+                previewBox.style.display = isPreview ? 'block' : 'none';
+                tabBar.querySelectorAll('.rp-tab').forEach(t => {
+                    t.classList.toggle('rp-active', t.dataset.tab === next);
+                });
+                if (isPreview) {
+                    previewBox.innerHTML = renderPreviewInto(textarea.value);
+                }
+            };
 
-        let mode = 'edit';
-        const setTab = next => {
-            mode = next;
-            const isPreview = next === 'preview';
-            textarea.style.display = isPreview ? 'none' : '';
-            previewBox.style.display = isPreview ? 'block' : 'none';
-            tabBar.querySelectorAll('.rp-tab').forEach(t => {
-                t.classList.toggle('rp-active', t.dataset.tab === next);
+            tabBar.addEventListener('click', e => {
+                // 只认带 data-tab 的标签；"图片"按钮同用 rp-tab 的样式但不能切模式
+                const tab = e.target.closest('.rp-tab[data-tab]');
+                if (tab) setTab(tab.dataset.tab);
             });
-            if (isPreview) {
-                previewBox.innerHTML = renderPreview(textarea.value) || emptyHint;
-            }
-        };
 
-        tabBar.addEventListener('click', e => {
-            // 只认带 data-tab 的标签；"图片"按钮同用 rp-tab 的样式但不能切模式
-            const tab = e.target.closest('.rp-tab[data-tab]');
-            if (tab) setTab(tab.dataset.tab);
-        });
+            // 预览模式下实时渲染
+            textarea.addEventListener('input', () => {
+                if (mode === 'preview') previewBox.innerHTML = renderPreviewInto(textarea.value);
+            });
+        }
 
-        // 预览模式下实时渲染
-        textarea.addEventListener('input', () => {
-            if (mode === 'preview') previewBox.innerHTML = renderPreview(textarea.value) || emptyHint;
-        });
-
-        // Cmd/Ctrl + Enter 快速回复
+        // Cmd/Ctrl + Enter 快速回复 / 快速发布
         textarea.addEventListener('keydown', e => {
             if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
                 e.preventDefault();
@@ -734,7 +802,7 @@
         });
 
         // ==================== 图片粘贴/拖放上传（Imgur） ====================
-        const uploadStatusEl = tabBar.querySelector('#rp-upload-status');
+        const uploadStatusEl = tabBar.querySelector('.rp-upload-status');
         const setUploadStatus = (text, isError) => {
             uploadStatusEl.textContent = text;
             uploadStatusEl.style.color = isError ? '#d9534f' : '#99a0a6';
@@ -815,15 +883,26 @@
             });
         }
 
-        const handleImageUpload = file => {
-            const clientId = pickImgurClientId();
-            // 光标处插入占位符，成功后替换为图片链接，失败则回收
-            const ph = `[图片上传中…#${++uploadSeq}]`;
+        // 插入文本到编辑器。/write 页自带 insertPicture(url)：按当前 syntax
+        // （原生格式裸链接 / Markdown 的 ![]()）格式化后插到 CodeMirror 光标处并 focus。
+        // 有它就直接用——CodeMirror 接管后直接写 textarea.value 不会同步回编辑器。
+        const insertText = text => {
+            const fn = pageWin.insertPicture;
+            if (typeof fn === 'function' && /^https?:\/\/\S+$/i.test(text)) { fn(text); return; }
             const start = textarea.selectionStart ?? textarea.value.length;
             const end = textarea.selectionEnd ?? start;
-            textarea.value = textarea.value.slice(0, start) + ph + textarea.value.slice(end);
-            textarea.selectionStart = textarea.selectionEnd = start + ph.length;
+            textarea.value = textarea.value.slice(0, start) + text + textarea.value.slice(end);
+            textarea.selectionStart = textarea.selectionEnd = start + text.length;
             textarea.dispatchEvent(new Event('input'));
+        };
+
+        const handleImageUpload = file => {
+            const clientId = pickImgurClientId();
+            const nativeInsert = typeof pageWin.insertPicture === 'function';
+            // 走原生插入时不放占位符（CodeMirror 下没有稳定可靠的位置标记可跟踪），
+            // 只用状态条提示；回复框是原生 textarea，仍走占位符 + 替换。
+            const ph = nativeInsert ? '' : `[图片上传中…#${++uploadSeq}]`;
+            if (ph) insertText(ph);
             setUploadStatus('上传中…');
             normalizeImage(file).then(blob => {
                 const fd = new FormData();
@@ -847,10 +926,14 @@
                 }
                 return json.data.link;
             })).then(link => {
-                textarea.value = textarea.value.replace(ph, link);
-                const pos = textarea.value.indexOf(link) + link.length;
-                textarea.selectionStart = textarea.selectionEnd = pos;
-                textarea.dispatchEvent(new Event('input'));
+                if (nativeInsert) {
+                    insertText(link);
+                } else {
+                    textarea.value = textarea.value.replace(ph, link);
+                    const pos = textarea.value.indexOf(link) + link.length;
+                    textarea.selectionStart = textarea.selectionEnd = pos;
+                    textarea.dispatchEvent(new Event('input'));
+                }
                 setUploadStatus('上传成功');
             }).catch(err => {
                 textarea.value = textarea.value.replace(ph, '');
@@ -873,9 +956,19 @@
             return false;
         };
 
+        // 事件是否发生在这个编辑器里。CodeMirror 场景下 target 是 CM 容器内的元素，
+        // 而源 textarea 是 display:none 的，只比 textarea 会漏掉。
+        // 容器每次现取：CM 可能在脚本之后才初始化，或被切换正文/预览时重建。
+        const inEditor = el => {
+            if (!el) return false;
+            if (el === textarea) return true;
+            const cm = (scope.container && scope.container()) || null;
+            return !!cm && (el === cm || (cm.contains && cm.contains(el)));
+        };
+
         const onPaste = e => {
             if (handledPasteEvent === e) return;
-            if (e.target !== textarea && document.activeElement !== textarea) return;
+            if (!inEditor(e.target) && !inEditor(document.activeElement)) return;
             const files = pickImageFiles(e.clipboardData);
             if (!files.length) return;   // 纯文本粘贴不受任何影响
             if (isDupInsert()) return;
@@ -883,25 +976,29 @@
             e.preventDefault();
             files.forEach(handleImageUpload);
         };
-        textarea.addEventListener('paste', onPaste);
+        inputEl.addEventListener('paste', onPaste);
         document.addEventListener('paste', onPaste, true);
 
         // iOS 16.4+ 的 beforeinput 也会捎带 dataTransfer.files，作为粘贴的补充路径
-        textarea.addEventListener('beforeinput', e => {
+        const onBeforeInput = e => {
             if (e.inputType !== 'insertFromPaste') return;
+            if (!inEditor(e.target)) return;
             const files = pickImageFiles(e.dataTransfer);
             if (!files.length) return;
             if (isDupInsert()) return;
             e.preventDefault();
             files.forEach(handleImageUpload);
-        });
+        };
+        document.addEventListener('beforeinput', onBeforeInput, true);
 
         // 相册选图 / 拍照：点"图片"按钮唤起系统选择器（移动端唯一可靠的入口）
-        const oldInput = document.getElementById('rp-file-input');
+        // 每个编辑器一个独立 input，避免两个编辑器的 id 撞车、互相删掉对方的选择器
+        const fileInputId = 'rp-file-input-' + scope.key;
+        const oldInput = document.getElementById(fileInputId);
         if (oldInput) oldInput.remove();
         const fileInput = document.createElement('input');
         fileInput.type = 'file';
-        fileInput.id = 'rp-file-input';
+        fileInput.id = fileInputId;
         fileInput.accept = 'image/*';
         fileInput.multiple = true;
         fileInput.style.display = 'none';
@@ -912,7 +1009,7 @@
         });
         document.body.appendChild(fileInput);
 
-        const uploadBtn = tabBar.querySelector('#rp-upload-btn');
+        const uploadBtn = tabBar.querySelector('.rp-upload-btn');
         if (uploadBtn) {
             uploadBtn.addEventListener('click', () => {
                 // 必须保留在用户手势里调用，否则 iOS Safari 不弹选择器
@@ -920,14 +1017,17 @@
             });
         }
 
-        // 拖放图片文件（桌面端）
-        textarea.addEventListener('dragover', e => e.preventDefault());
-        textarea.addEventListener('drop', e => {
-            const files = pickImageFiles(e.dataTransfer);
-            if (!files.length) return;
-            e.preventDefault();
-            files.forEach(handleImageUpload);
-        });
+        // 拖放图片文件（桌面端）。/write 页原生已用 initImageDragDropUpload 接管了
+        // .CodeMirror 区域的拖放上传，再挂一层会重复上传，所以只给回复框挂
+        if (!mountPoint) {
+            textarea.addEventListener('dragover', e => e.preventDefault());
+            textarea.addEventListener('drop', e => {
+                const files = pickImageFiles(e.dataTransfer);
+                if (!files.length) return;
+                e.preventDefault();
+                files.forEach(handleImageUpload);
+            });
+        }
 
         // 回复按钮旁的快捷键提示
         const form = textarea.closest('form');
@@ -937,31 +1037,43 @@
             const isMac = /Mac|iPhone|iPad/.test(navigator.platform || '');
             const hint = document.createElement('span');
             hint.style.cssText = 'margin-left:8px;color:#99a0a6;font-size:12px;vertical-align:middle;';
-            hint.textContent = (isMac ? '⌘' : 'Ctrl') + ' + Enter 快速回复';
+            hint.textContent = (isMac ? '⌘' : 'Ctrl') + ' + Enter ' + scope.hint;
             submitBtn.parentNode.insertBefore(hint, submitBtn.nextSibling);
         }
     }
 
-    // 回复框可能被其它脚本（如“回复框停靠”类工具）重建或挪动：
-    // 在 MutationObserver 里确认标签栏仍紧贴 textarea——被挪走就跟随，被销毁就重建
-    function ensureReplyPreview() {
-        const textarea = getReplyTextarea();
+    // 编辑器可能被其它脚本（如“回复框停靠”类工具）重建或挪动：
+    // 在 MutationObserver 里确认标签栏仍紧贴 textarea——被挪走就跟随，被销毁就重建。
+    // tabs 模式要求 tab 栏 + 预览框都在；仅图片条模式只要求图片条在。
+    function ensureEditorPreview(scope) {
+        const textarea = scope.find();
         if (!textarea || !textarea.parentNode) return;
-        const tabBar = document.getElementById('rp-tab-bar');
-        const previewBox = document.getElementById('reply-preview');
-        if (textarea.dataset.previewEnhanced === '1' && tabBar && previewBox &&
-            tabBar.parentNode === textarea.parentNode) return;
-        if (!textarea.dataset.previewEnhanced || !tabBar || !previewBox) {
+        // 挂原生 tab 栏优先；页面结构对不上（比如官方改版或 /new/xxx 没有 tab 栏）就回落到 textarea 前
+        const mountPoint = (scope.mount && scope.mount()) || textarea.parentNode;
+        if (!mountPoint) return;
+        const tabBar = document.getElementById(scope.tabBarId);
+        const previewBox = scope.tabs ? document.getElementById(scope.previewId) : null;
+        if (textarea.dataset.previewEnhanced === '1' && tabBar &&
+            (!scope.tabs || previewBox) &&
+            tabBar.parentNode === mountPoint) return;
+        if (!textarea.dataset.previewEnhanced || !tabBar || (scope.tabs && !previewBox)) {
             // textarea 被替换成新元素，或 UI 节点被其它脚本销毁：清掉残留后重建
             if (tabBar) tabBar.remove();
-            if (previewBox) previewBox.remove();
+            if (scope.tabs && previewBox) previewBox.remove();
             delete textarea.dataset.previewEnhanced;
-            initReplyPreview();
+            initEditorPreview(scope);
             return;
         }
-        // 同一个 textarea 被挪到了新位置：标签栏和预览跟随过去
-        textarea.parentNode.insertBefore(tabBar, textarea);
-        textarea.parentNode.insertBefore(previewBox, textarea.nextSibling);
+        // 编辑器被挪到了新位置：UI 跟随过去
+        mountPoint.appendChild(tabBar);
+        if (scope.tabs) {
+            textarea.parentNode.insertBefore(previewBox, textarea.nextSibling);
+        }
+    }
+
+    // 回复框与发帖框分别保障一次；当前页面不存在对应编辑器时 find() 返回 null，直接跳过
+    function ensureAllEditorPreviews() {
+        editorScopes.forEach(ensureEditorPreview);
     }
 
     // ==================== 初始化 ====================
@@ -971,7 +1083,7 @@
     if (config.decodeBase64) {
         getTextNodesWithin(document.body).forEach(decodeTextNode);
     }
-    initReplyPreview();
+    ensureAllEditorPreviews();
 
     // 监听动态内容
     const observer = new MutationObserver(onDomChange);
