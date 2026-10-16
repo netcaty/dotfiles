@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         v2ex屏蔽器
 // @namespace    https://github.com/netcaty
-// @version      2.21
-// @description  按关键词屏蔽 V2EX 帖子，支持隐藏/折叠/模糊、开关即时生效、Base64 自动解码、回复框与发帖框预览、图片上传（粘贴 / 相册选图）
+// @version      2.23
+// @description  按关键词屏蔽 V2EX 帖子，支持隐藏/折叠/模糊、开关即时生效、Base64 自动解码、URL ?reply= 预填回复框、回复框与发帖框预览、图片上传（粘贴 / 相册选图）
 // @author       netcaty
 // @license      MIT
 // @homepageURL  https://github.com/netcaty/dotfiles
@@ -26,6 +26,8 @@
         blockMode: 'hide',
         enabled: true,
         decodeBase64: true,
+        // URL 带 ?reply=<base64> 时，解码后自动填进回复框（配合外部工具自动发布）
+        prefillReply: true,
         // 从标题链接向上查找的行容器：首页是 div.cell.item，节点页（/go/xxx）是 div.cell.from_xxx.t_xxx，
         // 统一用 div.cell 两边都命中（closest 只会命中标题所在的行，不会误伤页头/分页等 cell）
         titleSelector: 'div.cell',
@@ -36,7 +38,7 @@
     // 当前版本号（显示在设置面板标题旁，便于确认更新是否生效）
     // 优先读宿主提供的脚本元数据；iOS Userscripts / Greasemonkey 4 这类宿主没有 GM_info
     // （或只提供 GM.info），读不到就回落到下面的常量——改 @version 时同步改这里
-    const FALLBACK_VERSION = '2.21';
+    const FALLBACK_VERSION = '2.23';
     const SCRIPT_VERSION = (() => {
         let info = null;
         try {
@@ -81,6 +83,7 @@
         titleSelector: gmGet('titleSelector', defaultConfig.titleSelector),
         rowSelector: gmGet('rowSelector', defaultConfig.rowSelector),
         decodeBase64: gmGet('decodeBase64', defaultConfig.decodeBase64),
+        prefillReply: gmGet('prefillReply', defaultConfig.prefillReply),
         imgurClientId: (gmGet('imgurClientId', defaultConfig.imgurClientId) || '').trim()
     };
 
@@ -178,6 +181,17 @@
                 </label>
             </div>
 
+            <div style="margin-top:10px;">
+                <label>
+                    <input id="prefill-toggle" type="checkbox" ${config.prefillReply ? 'checked' : ''}>
+                    URL ?reply= 预填回复框
+                </label>
+                <div style="margin-top:4px;font-size:12px;color:#888;line-height:1.4;">
+                    打开形如 <code>/t/123456?reply=&lt;base64&gt;</code> 的链接时，
+                    把解码后的正文自动填进回复框（仅在回复框为空时填充），便于配合外部工具自动发布。
+                </div>
+            </div>
+
             <button id="save-settings" style="margin-top:15px;width:100%;padding:8px;">
                 保存设置
             </button>
@@ -222,6 +236,16 @@
             config.decodeBase64 = e.target.checked;
             gmSet('decodeBase64', config.decodeBase64);
             toggleBase64Decode();
+        });
+
+        // URL ?reply= 预填开关（不刷新页面；重新打开时若回复框还是空的会立即补填）
+        document.getElementById('prefill-toggle').addEventListener('change', (e) => {
+            config.prefillReply = e.target.checked;
+            gmSet('prefillReply', config.prefillReply);
+            if (config.prefillReply) {
+                replyPrefillDone = false;
+                prefillReplyFromUrl();
+            }
         });
 
         // Imgur Client-ID（失焦即保存）
@@ -570,10 +594,11 @@
         }
     }
 
-    // 统一处理 DOM 变化（关键词屏蔽 + base64 解码）
+    // 统一处理 DOM 变化（关键词屏蔽 + base64 解码 + URL 预填回复框）
     function onDomChange(mutations) {
         if (config.enabled) initBlocker();
         ensureAllEditorPreviews();
+        prefillReplyFromUrl();
         if (!config.decodeBase64) return;
 
         mutations.forEach((mutation) => {
@@ -1076,6 +1101,89 @@
         editorScopes.forEach(ensureEditorPreview);
     }
 
+    // ==================== URL ?reply= 预填回复框 ====================
+    // 配合外部工具生成链接自动发布：/t/123456?reply=<base64>
+    // 与正文自动解码（decodeBase64Text）不同：参数由链接显式指定，不做「像不像 base64」的启发式过滤，
+    // 只有解码失败才放弃——否则正文里的正常中文、短句会被误杀。
+
+    // 完整解码：支持 URL-safe 变体（- _）与缺失 padding，按 UTF-8 还原
+    function decodeBase64Param(token) {
+        let b64 = token.replace(/-/g, '+').replace(/_/g, '/');
+        const rem = b64.length % 4;
+        if (rem === 1) return null;          // 长度非法
+        if (rem === 2) b64 += '==';
+        else if (rem === 3) b64 += '=';
+
+        let binary;
+        try {
+            binary = atob(b64);              // 含非法字符会直接抛错
+        } catch (e) {
+            return null;
+        }
+        try {
+            return new TextDecoder('utf-8').decode(
+                Uint8Array.from(binary, c => c.charCodeAt(0))
+            );
+        } catch (e) {
+            return null;
+        }
+    }
+
+    // 从当前 URL 读 reply 参数；没有或解不出返回 null。
+    // 直接在 location.href 上正则匹配，而不是用 location.search —— 因为外部工具常把顺手的锚点
+    // 带进来，拼成 /t/1234#reply5?reply=xxx，此时 '?' 之后整段都成了 fragment，search 是空串。
+    // 三种写法都覆盖：?reply= / &reply= / #...?reply=
+    function readReplyFromUrl() {
+        // 不把空格当结尾：有的工具会把 base64 里的 '+' 写成空格，交给下面的还原逻辑处理
+        const m = /[?&#]reply=([^&#]*)/.exec(location.href);
+        if (!m) return null;
+
+        let raw = m[1];
+        try {
+            // 先做 URL 解码：%2B 还原成 '+'，%2F 还原成 '/'，%20 还原成空格
+            raw = decodeURIComponent(raw);
+        } catch (e) {
+            // 含非法转义序列就按原样用（base64 字母表里没有 '%'，一般走不到这里）
+        }
+        // 再还原空格：URLSearchParams / form 语义里 '+' 等价于空格，%20 解出来也是空格，
+        // 而标准 base64 里 '+' 很常见，这里补回来
+        raw = raw.replace(/ /g, '+').trim();
+        if (!raw) return null;
+
+        const decoded = decodeBase64Param(raw);
+        return decoded && decoded.trim() ? decoded : null;
+    }
+
+    // 只填一次：填过（或确认该放弃）就不再重试，避免在用户编辑过程中反复覆盖
+    let replyPrefillDone = false;
+
+    function prefillReplyFromUrl() {
+        if (replyPrefillDone || !config.prefillReply) return;
+
+        const text = readReplyFromUrl();
+        if (!text) { replyPrefillDone = true; return; }   // URL 里没这个参数，不必每轮 DOM 变化都解析
+
+        const textarea = getReplyTextarea();
+        if (!textarea) return;            // 回复框还没渲染出来，留给下一轮 DOM 变化再试
+
+        // 已有内容（草稿 / 手写了一半）就不覆盖，避免踩掉正在编辑的回复
+        if (textarea.value.trim()) { replyPrefillDone = true; return; }
+        replyPrefillDone = true;
+
+        textarea.value = text;
+
+        // 若页面把编辑器换成了 CodeMirror（宿主脚本干的），写 textarea.value 不会同步过去，
+        // 有 CM 实例就再走一次它的 API
+        const cmEl = document.querySelector('.CodeMirror');
+        const cm = cmEl && cmEl.CodeMirror;
+        if (cm && typeof cm.setValue === 'function') {
+            try { cm.setValue(text); } catch (e) {}
+        }
+
+        // 冒泡的 input 事件：既让「编辑/预览」增强立刻能渲染，也让 V2EX 自身的草稿保存感知到改动
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+
     // ==================== 初始化 ====================
     const icon = createTriggerIcon();
     const panel = createSettingsPanel();
@@ -1084,6 +1192,7 @@
         getTextNodesWithin(document.body).forEach(decodeTextNode);
     }
     ensureAllEditorPreviews();
+    prefillReplyFromUrl();
 
     // 监听动态内容
     const observer = new MutationObserver(onDomChange);
