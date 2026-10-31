@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         v2ex屏蔽器
 // @namespace    https://github.com/netcaty
-// @version      2.23
-// @description  按关键词屏蔽 V2EX 帖子，支持隐藏/折叠/模糊、开关即时生效、Base64 自动解码、URL ?reply= 预填回复框、回复框与发帖框预览、图片上传（粘贴 / 相册选图）
+// @version      2.25
+// @description  按关键词屏蔽 V2EX 帖子（隐藏/折叠/模糊），附带 Base64 自动解码、回复/发帖框预览与图片上传
 // @author       netcaty
 // @license      MIT
 // @homepageURL  https://github.com/netcaty/dotfiles
@@ -38,7 +38,7 @@
     // 当前版本号（显示在设置面板标题旁，便于确认更新是否生效）
     // 优先读宿主提供的脚本元数据；iOS Userscripts / Greasemonkey 4 这类宿主没有 GM_info
     // （或只提供 GM.info），读不到就回落到下面的常量——改 @version 时同步改这里
-    const FALLBACK_VERSION = '2.23';
+    const FALLBACK_VERSION = '2.25';
     const SCRIPT_VERSION = (() => {
         let info = null;
         try {
@@ -94,7 +94,7 @@
         icon.title = '点击配置屏蔽规则';
         icon.style = `
             position: fixed;
-            top: 20px;
+            bottom: 20px;
             right: 20px;
             width: 32px;
             height: 32px;
@@ -112,6 +112,32 @@
             transition: transform 0.2s;
         `;
         icon.innerHTML = '⚙️';
+
+        // 角标：显示当前页面已屏蔽的条数，默认隐藏
+        const badge = document.createElement('span');
+        badge.id = 'content-blocker-badge';
+        badge.style = `
+            position: absolute;
+            top: -5px;
+            right: -7px;
+            min-width: 16px;
+            height: 16px;
+            padding: 0 4px;
+            box-sizing: border-box;
+            border-radius: 8px;
+            background: #f44336;
+            color: #fff;
+            font-size: 11px;
+            line-height: 16px;
+            font-weight: 600;
+            text-align: center;
+            white-space: nowrap;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+            pointer-events: none;
+            display: none;
+        `;
+        icon.appendChild(badge);
+
         document.body.appendChild(icon);
 
         // 添加点击事件
@@ -131,8 +157,10 @@
         panel.id = 'content-blocker-panel';
         panel.style = `
             position: fixed;
-            top: 60px;
+            bottom: 64px;
             right: 20px;
+            max-height: calc(100vh - 90px);
+            overflow-y: auto;
             background: white;
             border: 1px solid #ccc;
             border-radius: 8px;
@@ -181,31 +209,9 @@
                 </label>
             </div>
 
-            <div style="margin-top:10px;">
-                <label>
-                    <input id="prefill-toggle" type="checkbox" ${config.prefillReply ? 'checked' : ''}>
-                    URL ?reply= 预填回复框
-                </label>
-                <div style="margin-top:4px;font-size:12px;color:#888;line-height:1.4;">
-                    打开形如 <code>/t/123456?reply=&lt;base64&gt;</code> 的链接时，
-                    把解码后的正文自动填进回复框（仅在回复框为空时填充），便于配合外部工具自动发布。
-                </div>
-            </div>
-
             <button id="save-settings" style="margin-top:15px;width:100%;padding:8px;">
                 保存设置
             </button>
-
-            <div style="margin-top:10px;border-top:1px solid #eee;padding-top:10px;">
-                <label>Imgur Client-ID（回复框 / 发帖框粘贴或拖入图片自动上传）：
-                    <input id="imgur-client-id" type="text" placeholder="留空则用内置公共 ID；想用自己的请填"
-                           style="width:100%;margin-top:5px;padding:5px;font-size:13px;box-sizing:border-box;">
-                </label>
-                <div style="margin-top:4px;font-size:12px;color:#888;line-height:1.4;">
-                    留空时使用脚本内置的公共 ID（共享匿名配额，可能随时被限流或失效），
-                    填入自己的 Client-ID 则优先使用。
-                </div>
-            </div>
         `;
 
         document.body.appendChild(panel);
@@ -238,23 +244,9 @@
             toggleBase64Decode();
         });
 
-        // URL ?reply= 预填开关（不刷新页面；重新打开时若回复框还是空的会立即补填）
-        document.getElementById('prefill-toggle').addEventListener('change', (e) => {
-            config.prefillReply = e.target.checked;
-            gmSet('prefillReply', config.prefillReply);
-            if (config.prefillReply) {
-                replyPrefillDone = false;
-                prefillReplyFromUrl();
-            }
-        });
-
-        // Imgur Client-ID（失焦即保存）
-        const imgurInput = document.getElementById('imgur-client-id');
-        imgurInput.value = config.imgurClientId;
-        imgurInput.addEventListener('change', () => {
-            config.imgurClientId = imgurInput.value.trim();
-            gmSet('imgurClientId', config.imgurClientId);
-        });
+        // URL ?reply= 预填与 Imgur Client-ID 已不再提供面板入口，
+        // 配置项（defaultConfig / GM 存储 / prefillReplyFromUrl / 上传逻辑）保持原样，
+        // 需要改的话直接改 config 或存储值。
 
         return panel;
     }
@@ -349,9 +341,10 @@
 
     // 主屏蔽逻辑
     function initBlocker() {
-        if (!config.enabled) return;
-
-        if (!config.keywords.length) return;
+        if (!config.enabled || !config.keywords.length) {
+            updateBlockedBadge();
+            return;
+        }
 
         const lowerCaseKeywords = config.keywords.map(k => k.toLowerCase());
 
@@ -378,6 +371,8 @@
                 applyBlockStyle(item, config.blockMode);
             }
         });
+
+        updateBlockedBadge();
     }
 
     // 查找最近的匹配父元素
@@ -394,6 +389,27 @@
     const blockedItems = new Set();
     const collapsedItems = new Set();
     const collapseState = new WeakMap();
+
+    // 悬浮按钮上的数字角标：当前页面被屏蔽的条数（隐藏/模糊 + 折叠）
+    // ⚠️ 写 DOM 一律先比对再写：initBlocker 会被 MutationObserver 反复触发，
+    // 而改 textContent 本身又会产生 childList 变更，无条件写入会形成死循环。
+    function updateBlockedBadge() {
+        const badge = document.getElementById('content-blocker-badge');
+        if (!badge) return;
+
+        const count = config.enabled ? blockedItems.size + collapsedItems.size : 0;
+        const text = count > 0 ? (count > 99 ? '99+' : String(count)) : '';
+        const display = count > 0 ? 'block' : 'none';
+
+        if (badge.textContent !== text) badge.textContent = text;
+        if (badge.style.display !== display) badge.style.display = display;
+
+        const icon = document.getElementById('content-blocker-icon');
+        if (icon) {
+            const title = count > 0 ? `已屏蔽 ${count} 条，点击配置屏蔽规则` : '点击配置屏蔽规则';
+            if (icon.title !== title) icon.title = title;
+        }
+    }
 
     // 折叠：整行收起，原位留一条带箭头的折叠条；点一下展开看原文，再点收回
     function collapseElement(element) {
@@ -466,6 +482,8 @@
             el.style.display = '';
         });
         collapsedItems.clear();
+
+        updateBlockedBadge();
     }
 
     // ==================== Base64 内容自动解码 ====================
@@ -542,6 +560,10 @@
                 if (!parent) return NodeFilter.FILTER_REJECT;
                 if (SKIP_BASE64_TAGS.has(parent.tagName)) return NodeFilter.FILTER_REJECT;
                 if (parent.id === 'content-blocker-panel' || parent.id === 'content-blocker-icon') {
+                    return NodeFilter.FILTER_REJECT;
+                }
+                // 浮动按钮内部（含数字角标）同样跳过
+                if (parent.closest && parent.closest('#content-blocker-icon, #content-blocker-panel')) {
                     return NodeFilter.FILTER_REJECT;
                 }
                 return NodeFilter.FILTER_ACCEPT;
