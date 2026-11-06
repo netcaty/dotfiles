@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         v2ex屏蔽器
 // @namespace    https://github.com/netcaty
-// @version      2.25
+// @version      2.26
 // @description  按关键词屏蔽 V2EX 帖子（隐藏/折叠/模糊），附带 Base64 自动解码、回复/发帖框预览与图片上传
 // @author       netcaty
 // @license      MIT
@@ -38,7 +38,7 @@
     // 当前版本号（显示在设置面板标题旁，便于确认更新是否生效）
     // 优先读宿主提供的脚本元数据；iOS Userscripts / Greasemonkey 4 这类宿主没有 GM_info
     // （或只提供 GM.info），读不到就回落到下面的常量——改 @version 时同步改这里
-    const FALLBACK_VERSION = '2.25';
+    const FALLBACK_VERSION = '2.26';
     const SCRIPT_VERSION = (() => {
         let info = null;
         try {
@@ -87,11 +87,25 @@
         imgurClientId: (gmGet('imgurClientId', defaultConfig.imgurClientId) || '').trim()
     };
 
+    // 双击回到顶部。优先平滑滚动；宿主不支持 options 形式或用户开了"减少动态效果"就瞬时跳转
+    function scrollToTop() {
+        const reduce = (typeof window.matchMedia === 'function') &&
+                       window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        try {
+            window.scrollTo({ top: 0, left: 0, behavior: reduce ? 'auto' : 'smooth' });
+        } catch (e) {
+            window.scrollTo(0, 0);
+        }
+    }
+
+    // 悬浮按钮的提示文案（角标计数变化时由 updateBlockedBadge 复用，保持两处一致）
+    const ICON_TITLE = '单击配置屏蔽规则，双击回到顶部';
+
     // 创建悬浮图标
     function createTriggerIcon() {
         const icon = document.createElement('div');
         icon.id = 'content-blocker-icon';
-        icon.title = '点击配置屏蔽规则';
+        icon.title = ICON_TITLE;
         icon.style = `
             position: fixed;
             bottom: 20px;
@@ -140,13 +154,32 @@
 
         document.body.appendChild(icon);
 
-        // 添加点击事件
+        // 单击开面板，双击回顶部。
+        // ⚠️ 浏览器再派发 dblclick 之前会先派发两次 click，所以单击动作必须延迟判定：
+        // 立刻 toggle 的话，双击会顺带把面板开一遍又关掉（净效果不变，但状态机乱了）。
+        const CLICK_DELAY = 240;
+        let clickTimer = null;
+
+        const syncIconScale = () => {
+            const p = document.getElementById('content-blocker-panel');
+            icon.style.transform = p && p.style.display === 'block' ? 'scale(1.1)' : 'scale(1)';
+        };
+
         icon.addEventListener('click', () => {
-            toggleSettingsPanel();
-            icon.style.transform = document.getElementById('content-blocker-panel').style.display === 'block'
-                ? 'scale(1.1)'
-                : 'scale(1)';
+            if (clickTimer !== null) {
+                // 延迟期内的第二次点击 → 判定为双击，撤销待执行的单击
+                clearTimeout(clickTimer);
+                clickTimer = null;
+                return;
+            }
+            clickTimer = setTimeout(() => {
+                clickTimer = null;
+                toggleSettingsPanel();
+                syncIconScale();
+            }, CLICK_DELAY);
         });
+
+        icon.addEventListener('dblclick', scrollToTop);
 
         return icon;
     }
@@ -406,7 +439,7 @@
 
         const icon = document.getElementById('content-blocker-icon');
         if (icon) {
-            const title = count > 0 ? `已屏蔽 ${count} 条，点击配置屏蔽规则` : '点击配置屏蔽规则';
+            const title = count > 0 ? `已屏蔽 ${count} 条 · ${ICON_TITLE}` : ICON_TITLE;
             if (icon.title !== title) icon.title = title;
         }
     }
